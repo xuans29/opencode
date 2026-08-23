@@ -26,7 +26,8 @@ export class Info extends Schema.Class<Info>("Config.Info")({
     description: "JSON schema reference for configuration validation",
   }),
   shell: Schema.String.pipe(optional).annotate({
-    description: "Default shell to use for terminal and shell tool execution",
+    description:
+      "Default host shell used by PTY and Shell API execution; the model-facing shell tool always uses /bin/sh in its Linux sandbox",
   }),
   model: ConfigModel.Selection.pipe(optional).annotate({
     description: "Default model to use when no session or agent model is selected",

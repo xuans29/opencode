@@ -166,6 +166,7 @@ describe("plan plugin reminders", () => {
       expect(persisted[0]).toContain("optionally create or update plan documents")
       expect(persisted[0]).toContain(planDirectory)
       expect(persisted[0]).toContain("Do not modify any other files")
+      expect(persisted[0]).toContain("Shell and script execution are unavailable")
       expect(persisted[1]).toContain("NO LONGER in Plan mode")
     }),
   )
@@ -257,6 +258,16 @@ describe("plan plugin mutations", () => {
       )
       expect(Permission.evaluate("edit", "/workspace/source.ts", planAgent.permissions).effect).toBe("deny")
       expect(Permission.evaluate("edit", "source.ts", planAgent.permissions).effect).toBe("deny")
+    }),
+  )
+
+  it.effect("denies shell, script, and delegated execution", () =>
+    Effect.gen(function* () {
+      const { planAgent } = yield* run()
+      expect(Permission.evaluate("shell", "git status", planAgent.permissions).effect).toBe("deny")
+      expect(Permission.evaluate("script", "python", planAgent.permissions).effect).toBe("deny")
+      expect(Permission.evaluate("script", "typescript", planAgent.permissions).effect).toBe("deny")
+      expect(Permission.evaluate("subagent", "general", planAgent.permissions).effect).toBe("deny")
     }),
   )
 

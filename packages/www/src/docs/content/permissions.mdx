@@ -23,6 +23,7 @@ Each rule has three required string fields:
     { "action": "read", "resource": "*.env", "effect": "deny" },
     { "action": "shell", "resource": "git status *", "effect": "allow" },
     { "action": "shell", "resource": "git push *", "effect": "deny" },
+    { "action": "script", "resource": "*", "effect": "ask" },
     { "action": "edit", "resource": "packages/docs/*.mdx", "effect": "allow" },
   ],
 }
@@ -70,6 +71,7 @@ current built-in actions use these resources:
 | `glob`               | The requested glob pattern                                                                                       |
 | `grep`               | The requested regular expression, not the search path                                                            |
 | `shell`              | The complete raw shell command string                                                                            |
+| `script`             | The selected sandbox language: `python` or `typescript`                                                          |
 | `subagent`           | The target agent ID                                                                                              |
 | `skill`              | The skill ID                                                                                                     |
 | `question`           | `*`                                                                                                              |
@@ -85,8 +87,9 @@ current built-in actions use these resources:
 
 An external path requires a separate `external_directory` decision before the
 tool's own `read` or `edit` decision. This applies to external paths used by
-`read`, `edit`, `write`, and `patch`, and to an external `shell` working
-directory.
+`read`, `edit`, `write`, and `patch`. Sandboxed `shell` and `script` working
+directories must stay inside the active Location and cannot be authorized as
+external directories.
 
 ```jsonc
 {
@@ -115,16 +118,84 @@ For `external_directory`, `read`, and `edit` resources, a leading `~`, `~/`,
 `$HOME`, or `$HOME/` is expanded when configuration loads. Shell resources are
 raw command text and are **not** home-expanded.
 
+Mutation paths are canonicalized before permission checks. Any explicit path,
+symlink, or junction that resolves outside the active Location requires a
+separate `external_directory` approval, so authorize only trusted directory
+boundaries.
+
+## Sandboxed model execution
+
+The built-in model-facing `shell` tool executes `/bin/sh -lc` in a disposable
+Linux container. The `script` tool executes Python or TypeScript in the same
+sandbox boundary. Both tools fail closed when the configured container runtime
+or image is unavailable; they do not fall back to host execution.
+
+The container runs without network access, as a non-root user, with a read-only
+container root filesystem, dropped capabilities, and bounded compute, process,
+time, temporary-storage, and output resources. The active Location is the only
+host project directory mounted into the container, at `/workspace`, and it is
+mounted read-write.
+
+The project and working directory are canonicalized before admission, and the
+filesystem root is always rejected. A Location is also rejected when it is the
+same as, contains, or is contained by OpenCode's managed data, cache,
+configuration, or state directories. This prevents a project mount from
+exposing tool-output archives, credentials, or other service-managed files.
+Set `OPENCODE_SANDBOX_WORKSPACE_ROOTS` to a host-path-delimiter-separated list
+of administrator-owned roots to restrict eligible Locations further. When it
+is unset, any other non-root active Location that passes canonical path
+validation remains eligible, so avoid selecting a broad directory containing
+unrelated files or secrets.
+
 <Callout type="warning">
-  `shell` runs with the host user's filesystem, process, and network authority. Its resource is raw text, not a parsed
-  command. External command arguments produce only best-effort warnings; `external_directory` is enforced for the
-  working directory, not every path embedded in a command. Prefer a narrow shell allowlist over patterns intended to
-  identify every dangerous command.
+  The container boundary is intended to isolate the host process and files outside the mounted Location; it does not
+  make the project read-only. An allowed shell command or script can read, create, modify, or delete any file exposed at
+  `/workspace`, including files that a dedicated `read` or `edit` tool would ask about. Leave both actions on `ask`
+  unless arbitrary-code execution is intended, keep any saved shell allowlists narrow, and do not use either action in a
+  read-only agent.
 </Callout>
 
-Relative mutation paths cannot escape the active Location, and symlink escapes
-from inside it are rejected. Explicit external paths are canonicalized before
-matching, so authorize only trusted directory boundaries.
+Shell permission scanning determines which raw command resources require
+approval; it is not a binary allowlist. The sandbox image exposes a fixed set of
+Linux programs, but shell commands and Python or TypeScript subprocesses may run
+any executable present in that image. A `script` approval covers the selected
+language, not a particular source-code hash.
+
+Allowing `shell` is equivalent to allowing arbitrary code inside the same
+container: a shell command can invoke the installed Python or Bun interpreter
+and can read project files directly. A `script` prompt is therefore a
+convenience boundary, not an additional isolation layer after `shell` has
+already been allowed.
+
+### Host execution surfaces
+
+PTY sessions and the Shell HTTP/API service remain host-side execution
+surfaces. They do not pass through the model tool permission policy or the
+model-facing sandbox. The top-level `shell` configuration selects the host shell
+for those surfaces; it does not change the sandboxed tool's `/bin/sh` runtime.
+
+### Single-user service boundary
+
+The current server is a single-user service, not a multi-tenant security
+boundary. Authentication grants access to the service but does not establish a
+user or tenant identity for ownership and quota enforcement. Sessions, stored
+permissions, credentials, and the service-wide sandbox scheduler therefore
+belong to one trusted user deployment.
+
+Do not expose one server instance to mutually untrusted users. Deploy a separate
+service process, operating-system account, data/config directories, and rootless
+container-runtime boundary for each user. Per-Session sandbox serialization and
+limits prevent one Session from running unbounded concurrent jobs; they do not
+isolate different users sharing the same service.
+
+By default, the service admits 4 running and 16 queued sandbox calls globally,
+and 1 running and 4 queued calls per Session. The whole-call deadline includes
+queueing. Administrators can tighten these single-user workload controls with
+`OPENCODE_SANDBOX_MAX_CONCURRENT`, `OPENCODE_SANDBOX_MAX_PENDING`,
+`OPENCODE_SANDBOX_MAX_SESSION_CONCURRENT`, and
+`OPENCODE_SANDBOX_MAX_SESSION_PENDING`. Sessions using the same Location still
+share its live files; use separate worktrees or volumes when filesystem
+isolation is required.
 
 ## Experimental shell scanner
 
@@ -147,21 +218,28 @@ original shell command without inferring external directories.
 ## Defaults
 
 Every agent, including custom agents, starts with ordered defaults that allow
-tools, ask for external directories, ask for `.env` reads, and allow
-`.env.example` reads. Shipped agents then add their own policies:
+most tools, ask before `shell` or `script` execution, ask for external
+directories, ask for `.env` reads, and allow `.env.example` reads. Shipped
+agents then add their own policies:
 
 | Agent                     | Effective default policy                                                                                                                |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `build`                   | Allows most actions; asks for external directories and `.env` reads; allows questions and entering plan mode; denies exiting plan mode  |
-| `plan`                    | Uses the same base, allows questions and exiting plan mode, and denies edits except OpenCode plan files                                 |
-| `general`                 | Uses the base policy but cannot launch another subagent; questions and plan transitions remain denied                                   |
+| `build`                   | Allows most actions; asks for shell, scripts, external directories, and `.env` reads; allows questions and entering plan mode           |
+| `plan`                    | Allows questions and exiting plan mode; denies shell, script, and subagent execution; denies edits except OpenCode plan files           |
+| `general`                 | Uses the base policy, including shell/script approval, but cannot launch another subagent; questions and plan transitions remain denied |
 | `explore`                 | Denies everything except `read`, `glob`, `grep`, `webfetch`, and `websearch`; cannot launch subagents and asks for external directories |
 | Hidden maintenance agents | Deny all actions                                                                                                                        |
 
-The base read rules are ordered as follows:
+The relevant base rules are ordered as follows. Because the last match wins,
+the `shell` and `script` rules override the broad allow without changing other
+actions:
 
 ```jsonc
 [
+  { "action": "*", "resource": "*", "effect": "allow" },
+  { "action": "shell", "resource": "*", "effect": "ask" },
+  { "action": "script", "resource": "*", "effect": "ask" },
+  { "action": "external_directory", "resource": "*", "effect": "ask" },
   { "action": "read", "resource": "*", "effect": "allow" },
   { "action": "read", "resource": "*.env", "effect": "ask" },
   { "action": "read", "resource": "*.env.*", "effect": "ask" },
@@ -169,12 +247,18 @@ The base read rules are ordered as follows:
 ]
 ```
 
-OpenCode also permits its managed tool-output, shell-output, temporary, and
-global configuration directories. These exceptions apply only to the
+OpenCode also permits its managed shell-output, temporary, and global
+configuration directories. These exceptions apply only to the
 external-directory boundary for every agent; the underlying action still uses
-its own permission rules. The environment instructions identify the temporary
-directory available for work outside the workspace. Later global and
-agent-specific rules can override these defaults.
+its own permission rules. Managed tool-output archives use a separate hard
+boundary: a Session may read only its own exact archive file, searches and
+directory listings cannot enumerate the archive tree, and filesystem mutation
+tools cannot modify it. The default agent policy also denies edits to that tree.
+The environment instructions identify the temporary directory available for
+work outside the workspace. Later global and agent-specific rules can override
+permission defaults, but not the tool-output ownership boundary. The built-in
+Plan agent then reasserts its shell, script, subagent, and external-edit
+restrictions after configured agent rules are applied.
 
 ## Agent overrides
 
@@ -220,8 +304,8 @@ When an `ask` rule matches, clients can reply with:
 Saved approvals are durable and project-scoped. They are additional `allow`
 rules, but they can never override a configured `deny`. The proposed saved
 pattern may be broader than the displayed resource: several tools propose `*`,
-shell proposes the exact command text, and skills and subagents propose their
-IDs. Review the confirmation carefully and remove saved approvals that are no
-longer needed.
+shell proposes the exact command text, script proposes its language, and skills
+and subagents propose their IDs. Review the confirmation carefully and remove
+saved approvals that are no longer needed.
 
 Non-interactive clients must decide how to handle requests that require approval; explicit `deny` rules remain enforced.

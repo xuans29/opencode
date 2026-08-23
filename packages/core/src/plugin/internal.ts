@@ -48,6 +48,7 @@ import { MCP } from "../mcp/index.js"
 import { Npm } from "@opencode-ai/util/npm"
 import { Permission } from "../permission.js"
 import { Reference } from "../reference.js"
+import { Sandbox } from "../sandbox.js"
 import { WebSearch } from "../websearch.js"
 import { Ripgrep } from "../ripgrep.js"
 import { SessionCompaction } from "../session/compaction.js"
@@ -66,6 +67,7 @@ import { QuestionTool } from "../tool/plugin/question.js"
 import { ReadToolFileSystem } from "../tool/read-filesystem.js"
 import { ReadTool } from "../tool/plugin/read.js"
 import { ShellTool } from "../tool/plugin/shell.js"
+import { ScriptTool } from "../tool/plugin/script.js"
 import { SkillTool } from "../tool/plugin/skill.js"
 import { SubagentTool } from "../tool/plugin/subagent.js"
 import { Tool } from "../tool.js"
@@ -119,6 +121,7 @@ const services = Effect.fn("PluginInternal.services")(function* () {
   const form = yield* Form.Service
   const read = yield* ReadToolFileSystem.Service
   const reference = yield* Reference.Service
+  const sandbox = yield* Sandbox.Service
   const websearch = yield* WebSearch.Service
   const ripgrep = yield* Ripgrep.Service
   const compaction = yield* SessionCompaction.Service
@@ -163,6 +166,7 @@ const services = Effect.fn("PluginInternal.services")(function* () {
     Context.make(Form.Service, form),
     Context.make(ReadToolFileSystem.Service, read),
     Context.make(Reference.Service, reference),
+    Context.make(Sandbox.Service, sandbox),
     Context.make(WebSearch.Service, websearch),
     Context.make(Ripgrep.Service, ripgrep),
     Context.make(SessionCompaction.Service, compaction),
@@ -214,6 +218,7 @@ export const requirements = LayerNode.group([
   Form.node,
   ReadToolFileSystem.node,
   Reference.node,
+  Sandbox.node,
   WebSearch.node,
   Ripgrep.node,
   SessionCompaction.node,
@@ -248,6 +253,7 @@ const pre = [
   GrepTool.Plugin,
   QuestionTool.Plugin,
   ReadTool.Plugin,
+  ScriptTool.Plugin,
   ShellTool.Plugin,
   SkillTool.Plugin,
   SubagentTool.Plugin,

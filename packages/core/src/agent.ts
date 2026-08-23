@@ -58,9 +58,9 @@ const layer = Layer.effect(
     const global = yield* Global.Service
     const permissions: Info["permissions"] = [
       { action: "external_directory", resource: SHELL_OUTPUT_GLOB(global.data), effect: "allow" },
-      { action: "external_directory", resource: TOOL_OUTPUT_GLOB(global.data), effect: "allow" },
       { action: "external_directory", resource: path.join(global.tmp, "*"), effect: "allow" },
       { action: "external_directory", resource: path.join(global.config, "*"), effect: "allow" },
+      { action: "edit", resource: TOOL_OUTPUT_GLOB(global.data), effect: "deny" },
     ]
     const state = State.create<Data, Draft>({
       name: "agent",

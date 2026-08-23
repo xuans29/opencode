@@ -14,6 +14,13 @@ export interface DirEntry {
   readonly type: FileType
 }
 
+export interface MutationGuard {
+  /** Canonical target authorized before the mutation began. */
+  readonly expectedCanonical?: string
+  /** Canonical parent plus lexical basename authorized for an entry removal. */
+  readonly expectedEntry?: string
+}
+
 export class NotFound extends Schema.TaggedError<NotFound>()("Environment.NotFound", {
   path: Schema.String,
 }) {}
@@ -39,12 +46,12 @@ export interface FilesImpl {
     path: string,
     range?: { readonly offset: number; readonly length: number },
   ) => Effect.Effect<{ readonly info: FileInfo; readonly bytes: Uint8Array }, NotFound | WrongKind | Failed>
-  readonly write: (path: string, bytes: Uint8Array) => Effect.Effect<void, Failed>
+  readonly write: (path: string, bytes: Uint8Array, guard?: MutationGuard) => Effect.Effect<void, Failed>
   /** Describes the path entry itself, so a final symlink is reported as `symlink` rather than followed. */
   readonly stat: (path: string) => Effect.Effect<FileInfo, NotFound | Failed>
   /** Follows a final symlink to the listed directory while preserving each returned entry's own type. */
   readonly list: (path: string) => Effect.Effect<ReadonlyArray<DirEntry>, NotFound | WrongKind | Failed>
-  readonly remove: (path: string) => Effect.Effect<void, Failed>
+  readonly remove: (path: string, guard?: MutationGuard) => Effect.Effect<void, Failed>
   readonly move: (from: string, to: string) => Effect.Effect<void, NotFound | Failed>
   readonly mkdir: (path: string) => Effect.Effect<void, Failed>
 }

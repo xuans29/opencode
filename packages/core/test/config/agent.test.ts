@@ -25,9 +25,9 @@ const decode = Schema.decodeUnknownSync(Info)
 const defaultPermissions = (global: Global.Interface): Permission.Ruleset => [
   ...Agent.Info.default(Agent.ID.make("test")).permissions,
   { action: "external_directory", resource: path.join(global.data, "shell", "*", "*"), effect: "allow" },
-  { action: "external_directory", resource: path.join(global.data, "tool-output", "*"), effect: "allow" },
   { action: "external_directory", resource: path.join(global.tmp, "*"), effect: "allow" },
   { action: "external_directory", resource: path.join(global.config, "*"), effect: "allow" },
+  { action: "edit", resource: path.join(global.data, "tool-output", "*"), effect: "deny" },
 ]
 
 test("rejects named agent color tokens", () => {

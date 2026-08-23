@@ -435,6 +435,31 @@ describe("Tool", () => {
     }),
   )
 
+  it.effect("decodes the final input after execute.before hooks", () =>
+    Effect.gen(function* () {
+      const service = yield* Tool.Service
+      const hooks = yield* PluginHooks.Service
+      yield* transform(service, { hooked_input: make() }, { codemode: false })
+      yield* hooks.register("tool", "execute.before", (event) =>
+        Effect.sync(() => {
+          if (event.tool === "hooked_input") event.input = { text: "after-hook" }
+        }),
+      )
+
+      expect(
+        yield* executeTool(service, {
+          sessionID,
+          ...identity,
+          call: { type: "tool-call", id: "hooked-input", name: "hooked_input", input: { text: 1 } },
+        }),
+      ).toMatchObject({
+        status: "completed",
+        output: { text: "after-hook" },
+        content: [{ type: "text", text: "after-hook" }],
+      })
+    }),
+  )
+
   it.effect("publishes progress metadata unchanged", () =>
     Effect.gen(function* () {
       const service = yield* Tool.Service

@@ -14,6 +14,7 @@ import { Permission } from "./permission.js"
 import { PluginHooks } from "./plugin/hooks.js"
 import { SessionMessage } from "./session/message.js"
 import { SessionSchema } from "./session/schema.js"
+import { ToolExecutionPolicy } from "./tool/execution-policy.js"
 import { definition, execute, normalizeContent } from "./tool/runtime.js"
 import { Wildcard } from "./util/wildcard.js"
 
@@ -97,6 +98,9 @@ const layer = Layer.effect(
         input,
       }
       yield* hooks.trigger("tool", "execute.before", beforeEvent)
+      const decision = ToolExecutionPolicy.decide(ToolExecutionPolicy.execution(tool))
+      yield* Effect.annotateCurrentSpan("tool.execution.target", decision.target)
+      if (decision.target === "sandbox") yield* Effect.annotateCurrentSpan("tool.execution.profile", decision.profile)
       const execution = yield* execute(tool, beforeEvent.input, context).pipe(
         Effect.map((value) => ({ value })),
         Effect.catchTag("Tool.Error", (failure) => Effect.succeed({ failure })),
@@ -162,6 +166,33 @@ const layer = Layer.effect(
           new RegistrationError({
             name: reserved.key,
             message: 'Tool name "execute" is reserved for CodeMode',
+          }),
+        )
+      const unsafe = entries.find(
+        (entry) =>
+          ToolExecutionPolicy.execution(entry.tool).class === "host" && ToolExecutionPolicy.isProtected(entry.key),
+      )
+      if (unsafe)
+        return yield* Effect.fail(
+          new RegistrationError({
+            name: unsafe.key,
+            message: `Tool name "${unsafe.key}" requires a sandbox registration`,
+          }),
+        )
+      const invalidSandbox = entries.find((entry) => {
+        const execution = ToolExecutionPolicy.execution(entry.tool)
+        return (
+          execution.class === "sandbox" &&
+          (execution.profile !== entry.key ||
+            !ToolExecutionPolicy.isProtected(entry.key) ||
+            entry.tool.options?.codemode !== false)
+        )
+      })
+      if (invalidSandbox)
+        return yield* Effect.fail(
+          new RegistrationError({
+            name: invalidSandbox.key,
+            message: `Sandbox registration "${invalidSandbox.key}" must be a direct tool matching its profile`,
           }),
         )
       if (entries.length === 0) return

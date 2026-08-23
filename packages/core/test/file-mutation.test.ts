@@ -110,6 +110,79 @@ describe("FileMutation", () => {
     ),
   )
 
+  it.live("fails closed when a symlink changes after target authorization", () =>
+    withTmp((directory) =>
+      withTmp((outside) =>
+        Effect.gen(function* () {
+          const actual = path.join(directory, "actual")
+          const linked = path.join(directory, "linked")
+          yield* Effect.promise(async () => {
+            await fs.mkdir(actual)
+            await fs.symlink(actual, linked, process.platform === "win32" ? "junction" : undefined)
+          })
+          const filesystem: EnvironmentFilesTransform = (files) => ({
+            write: (target, content, guard) =>
+              Effect.promise(async () => {
+                await fs.unlink(linked)
+                await fs.symlink(outside, linked, process.platform === "win32" ? "junction" : undefined)
+              }).pipe(Effect.andThen(files.write(target, content, guard))),
+          })
+
+          yield* Effect.gen(function* () {
+            const target = yield* (yield* LocationMutation.Service).resolve({ path: "linked/new.txt" })
+            expect(target.canonical).toBe(path.join(actual, "new.txt"))
+            expect(
+              yield* Effect.flip((yield* FileMutation.Service).write({ target, content: "blocked" })),
+            ).toBeInstanceOf(Environment.Failed)
+          }).pipe(provide(directory, filesystem))
+
+          expect(
+            yield* Effect.promise(() =>
+              fs.readFile(path.join(outside, "new.txt"), "utf8").then(
+                () => true,
+                () => false,
+              ),
+            ),
+          ).toBe(false)
+        }),
+      ),
+    ),
+  )
+
+  it.live("fails closed when an intermediate symlink changes immediately before removal", () =>
+    withTmp((directory) =>
+      withTmp((outside) =>
+        Effect.gen(function* () {
+          const actual = path.join(directory, "actual")
+          const linked = path.join(directory, "linked")
+          yield* Effect.promise(async () => {
+            await fs.mkdir(actual)
+            await Promise.all([
+              fs.writeFile(path.join(actual, "target.txt"), "inside"),
+              fs.writeFile(path.join(outside, "target.txt"), "outside"),
+            ])
+            await fs.symlink(actual, linked, process.platform === "win32" ? "junction" : undefined)
+          })
+          const filesystem: EnvironmentFilesTransform = (files) => ({
+            remove: (target, guard) =>
+              Effect.promise(async () => {
+                await fs.unlink(linked)
+                await fs.symlink(outside, linked, process.platform === "win32" ? "junction" : undefined)
+              }).pipe(Effect.andThen(files.remove(target, guard))),
+          })
+
+          yield* Effect.gen(function* () {
+            const target = yield* (yield* LocationMutation.Service).resolve({ path: "linked/target.txt" })
+            expect(yield* Effect.flip((yield* FileMutation.Service).remove(target))).toBeInstanceOf(Environment.Failed)
+          }).pipe(provide(directory, filesystem))
+
+          expect(yield* Effect.promise(() => fs.readFile(path.join(actual, "target.txt"), "utf8"))).toBe("inside")
+          expect(yield* Effect.promise(() => fs.readFile(path.join(outside, "target.txt"), "utf8"))).toBe("outside")
+        }),
+      ),
+    ),
+  )
+
   it.live("serializes concurrent writes to the same absolute target", () =>
     withTmp((directory) =>
       Effect.gen(function* () {
@@ -244,5 +317,7 @@ describe("FileMutation", () => {
 function instrumentWrites(
   run: <E>(write: Effect.Effect<void, E>, target: string) => Effect.Effect<void, E>,
 ): EnvironmentFilesTransform {
-  return (files) => ({ write: (target, content) => run(files.write(target, content), target) })
+  return (files) => ({
+    write: (target, content, guard) => run(files.write(target, content, guard), target),
+  })
 }

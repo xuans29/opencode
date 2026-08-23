@@ -12,6 +12,7 @@ import { SessionInstructions } from "../../session/instructions.js"
 import { AbsolutePath } from "../../schema.js"
 import { ReadToolFileSystem } from "../read-filesystem.js"
 import { Environment } from "../../environment/index.js"
+import { ToolOutput } from "../../tool-output.js"
 
 export const name = "read"
 const FILENAME = "AGENTS.md"
@@ -37,6 +38,7 @@ export const Plugin = {
     const sessionInstructions = yield* SessionInstructions.Service
     const fs = yield* FSUtil.Service
     const location = yield* Location.Service
+    const toolOutput = yield* ToolOutput.Service
 
     yield* ctx.tool
       .transform((draft) =>
@@ -55,8 +57,19 @@ export const Plugin = {
                 id: context.id,
               }
               const target = yield* mutation.resolve({ path: input.path })
+              const outputAccess = yield* toolOutput.access({
+                sessionID: context.sessionID,
+                absolute: target.absolute,
+                canonical: target.canonical,
+              })
+              if (outputAccess === "protected")
+                return yield* Effect.fail(
+                  new ToolFailure({
+                    message: "Managed tool output archives can only be read by the Session that created them",
+                  }),
+                )
               const external = target.externalDirectory
-              if (external)
+              if (external && outputAccess !== "archive")
                 yield* permission.assert({
                   ...LocationMutation.externalDirectoryPermission(external),
                   sessionID: context.sessionID,
@@ -64,7 +77,7 @@ export const Plugin = {
                   source,
                 })
               const resource = target.resource
-              const absolute = AbsolutePath.make(target.absolute)
+              const absolute = AbsolutePath.make(target.canonical)
               yield* permission.assert({
                 action: name,
                 resources: [resource],
@@ -76,7 +89,7 @@ export const Plugin = {
               const content = yield* reader.read(absolute, resource, { offset: input.offset, limit: input.limit }).pipe(
                 Effect.catchIf(
                   (error) => error instanceof Environment.NotFound,
-                  () => missing(input.path, target.absolute),
+                  () => missing(input.path, target.canonical),
                 ),
               )
               // After a successful read, discover nearby AGENTS.md walking up to the Location
@@ -86,7 +99,7 @@ export const Plugin = {
               // skipped, and discovery failures never fail the read.
               yield* Effect.gen(function* () {
                 if (target.externalDirectory !== undefined) return
-                const resolved = yield* fs.resolve(target.absolute)
+                const resolved = yield* fs.resolve(target.canonical)
                 const root = yield* fs.resolve(location.directory)
                 // up() searches its stop directory, so the Location-root AGENTS.md (already
                 // supplied by core initial instructions) is dropped by the dirname filter.

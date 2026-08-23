@@ -13,6 +13,7 @@ import { Permission } from "@opencode-ai/core/permission"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { Session } from "@opencode-ai/core/session"
 import { Tool } from "@opencode-ai/core/tool"
+import { ToolOutput } from "@opencode-ai/core/tool-output"
 import { WriteTool } from "@opencode-ai/core/tool/plugin/write"
 import { transformEnvironmentFiles } from "./fixture/environment"
 import { location } from "./fixture/location"
@@ -25,7 +26,15 @@ import { toolIdentity, executeTool, registerToolPlugin, toolDefinitions } from "
 const writeToolNode = makeLocationNode({
   name: "test/write-tool-plugin",
   layer: Layer.effectDiscard(registerToolPlugin(WriteTool.Plugin)),
-  deps: [Tool.node, LocationMutation.node, FileMutation.node, Environment.node, Formatter.node, Permission.node],
+  deps: [
+    Tool.node,
+    LocationMutation.node,
+    FileMutation.node,
+    Environment.node,
+    Formatter.node,
+    Permission.node,
+    ToolOutput.node,
+  ],
 })
 
 const sessionID = Session.ID.make("ses_write_tool_test")
@@ -33,6 +42,7 @@ const assertions: Permission.AssertInput[] = []
 const writes: string[] = []
 let formatFile = (_target: string): Effect.Effect<boolean> => Effect.succeed(false)
 let denyAction: string | undefined
+let toolOutputAccess: ToolOutput.Access = "unrelated"
 
 const permission = permissionLayer({
   assert: (input) =>
@@ -55,11 +65,16 @@ const formatter = Layer.mock(Formatter.Service, {
   file: (target) => formatFile(target),
 })
 
+const toolOutput = Layer.mock(ToolOutput.Service, {
+  access: () => Effect.succeed(toolOutputAccess),
+})
+
 const reset = () => {
   assertions.length = 0
   writes.length = 0
   formatFile = () => Effect.succeed(false)
   denyAction = undefined
+  toolOutputAccess = "unrelated"
 }
 
 const withTool = <A, E, R>(directory: string, body: (registry: Tool.Interface) => Effect.Effect<A, E, R>) => {
@@ -77,13 +92,14 @@ const withTool = <A, E, R>(directory: string, body: (registry: Tool.Interface) =
           [
             Environment.node,
             transformEnvironmentFiles(activeLocation, (files) => ({
-              write: (target, content) =>
-                Effect.sync(() => writes.push(target)).pipe(Effect.andThen(files.write(target, content))),
+              write: (target, content, guard) =>
+                Effect.sync(() => writes.push(target)).pipe(Effect.andThen(files.write(target, content, guard))),
             })),
           ],
           [Location.node, activeLocation],
           [Formatter.node, formatter],
           [Permission.node, permission],
+          [ToolOutput.node, toolOutput],
         ],
       ),
     ),
@@ -99,6 +115,30 @@ const call = (input: typeof WriteTool.Input.Type, id = "call-write") => ({
 const it = testEffect(Layer.empty)
 
 describe("WriteTool", () => {
+  it.live("blocks tool-output targets before permission or filesystem mutation", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        toolOutputAccess = "protected"
+        const target = path.join(tmp.path, "protected.txt")
+        return withTool(tmp.path, (registry) => executeTool(registry, call({ path: target, content: "blocked" }))).pipe(
+          Effect.andThen((result) =>
+            Effect.gen(function* () {
+              expect(result).toMatchObject({
+                status: "error",
+                error: { type: "tool.execution", message: "Tool output archives are read-only" },
+              })
+              expect(assertions).toEqual([])
+              expect(writes).toEqual([])
+            }),
+          ),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("registers and creates a relative file through FileMutation once", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -264,26 +304,28 @@ describe("WriteTool", () => {
     ),
   )
 
-  it.live("writes an external symlink target with only its in-location permission", () =>
+  it.live("requires external permission before writing through an in-location symlink", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
       ([active, outside]) => {
         reset()
-        if (process.platform === "win32") return Effect.void
         const target = path.join(outside.path, "external.txt")
-        const link = path.join(active.path, "link.txt")
+        const link = path.join(active.path, "linked")
         return Effect.promise(async () => {
           await fs.writeFile(target, "before")
-          await fs.symlink(target, link)
+          await fs.symlink(outside.path, link, process.platform === "win32" ? "junction" : undefined)
         }).pipe(
           Effect.andThen(
-            withTool(active.path, (registry) => executeTool(registry, call({ path: "link.txt", content: "after" }))),
+            withTool(active.path, (registry) =>
+              executeTool(registry, call({ path: "linked/external.txt", content: "after" })),
+            ),
           ),
           Effect.andThen((result) =>
             Effect.sync(() => {
               expect(result.status).toBe("completed")
-              expect(assertions.map((input) => input.action)).toEqual(["edit"])
-              expect(assertions[0]?.resources).toEqual(["link.txt"])
+              expect(assertions.map((input) => input.action)).toEqual(["external_directory", "edit"])
+              expect(assertions[0]?.resources).toEqual([path.join(outside.path, "*").replaceAll("\\", "/")])
+              expect(assertions[1]?.resources).toEqual([target.replaceAll("\\", "/")])
             }),
           ),
           Effect.andThen(Effect.promise(() => fs.readFile(target, "utf8"))),
@@ -294,6 +336,36 @@ describe("WriteTool", () => {
         Effect.promise(() =>
           Promise.all([active[Symbol.asyncDispose](), outside[Symbol.asyncDispose]()]).then(() => undefined),
         ),
+    ),
+  )
+
+  it.live("preserves writes through an in-location symlink to an in-location target", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (active) => {
+        reset()
+        const actual = path.join(active.path, "actual")
+        const link = path.join(active.path, "linked")
+        return Effect.promise(async () => {
+          await fs.mkdir(actual)
+          await fs.symlink(actual, link, process.platform === "win32" ? "junction" : undefined)
+        }).pipe(
+          Effect.andThen(
+            withTool(active.path, (registry) =>
+              executeTool(registry, call({ path: "linked/created.txt", content: "inside" })),
+            ),
+          ),
+          Effect.andThen((result) =>
+            Effect.gen(function* () {
+              expect(result.status).toBe("completed")
+              expect(assertions.map((input) => input.action)).toEqual(["edit"])
+              expect(assertions[0]?.resources).toEqual(["actual/created.txt"])
+              expect(yield* Effect.promise(() => fs.readFile(path.join(actual, "created.txt"), "utf8"))).toBe("inside")
+            }),
+          ),
+        )
+      },
+      (active) => Effect.promise(() => active[Symbol.asyncDispose]()),
     ),
   )
 

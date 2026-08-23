@@ -15,6 +15,7 @@ import { FileMutation } from "../../file-mutation.js"
 import { Formatter } from "../../formatter.js"
 import { LocationMutation } from "../../location-mutation.js"
 import { Permission } from "../../permission.js"
+import { ToolOutput } from "../../tool-output.js"
 import { fileDiff } from "./file-diff.js"
 
 export const name = "write"
@@ -51,6 +52,7 @@ export const Plugin = {
     const environment = yield* Environment.Service
     const formatter = yield* Formatter.Service
     const permission = yield* Permission.Service
+    const toolOutput = yield* ToolOutput.Service
 
     yield* ctx.tool
       .transform((draft) =>
@@ -69,6 +71,14 @@ export const Plugin = {
                 id: context.id,
               }
               const target = yield* mutation.resolve({ path: input.path, kind: "file" })
+              if (
+                (yield* toolOutput.access({
+                  sessionID: context.sessionID,
+                  absolute: target.absolute,
+                  canonical: target.canonical,
+                })) !== "unrelated"
+              )
+                return yield* new ToolFailure({ message: "Tool output archives are read-only" })
               const external = target.externalDirectory
               if (external)
                 yield* permission.assert({
@@ -77,7 +87,7 @@ export const Plugin = {
                   agent: context.agent,
                   source,
                 })
-              const current = yield* FileMutation.readText(environment.files, target.absolute).pipe(
+              const current = yield* FileMutation.readText(environment.files, target).pipe(
                 Effect.catchTag("Environment.NotFound", () => Effect.undefined),
               )
               const next = Bom.split(input.content)
@@ -92,9 +102,9 @@ export const Plugin = {
                 source,
               })
               const result = yield* fileMutation.writeTextPreservingBom({ target, content: input.content })
-              const bom = (yield* FileMutation.readText(environment.files, target.absolute)).bom
-              if (yield* formatter.file(target.absolute)) {
-                yield* FileMutation.syncTextBom(environment.files, target.absolute, bom)
+              const bom = (yield* FileMutation.readText(environment.files, target)).bom
+              if (yield* formatter.file(target.canonical)) {
+                yield* FileMutation.syncTextBom(environment.files, target, bom)
               }
               return result
             }).pipe(

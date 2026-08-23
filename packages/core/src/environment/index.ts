@@ -8,6 +8,7 @@ export {
   type Files,
   type FilesImpl,
   type FileType,
+  type MutationGuard,
   NotFound,
   typeFollowing,
   WrongKind,

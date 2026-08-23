@@ -38,6 +38,7 @@ describe("LocationMutation", () => {
 
         expect(target).toMatchObject({
           absolute: targetPath,
+          canonical: targetPath,
           resource: "hello.txt",
         })
         expect(target.externalDirectory).toBeUndefined()
@@ -52,6 +53,7 @@ describe("LocationMutation", () => {
         const target = yield* (yield* LocationMutation.Service).resolve({ path: path.join("src", "new.txt") })
         expect(target).toMatchObject({
           absolute: path.join(directory, "src", "new.txt"),
+          canonical: path.join(directory, "src", "new.txt"),
           resource: "src/new.txt",
         })
       }).pipe(provide(directory)),
@@ -75,40 +77,69 @@ describe("LocationMutation", () => {
     ),
   )
 
-  it.live("resolves a prospective target below an external symlink lexically", () =>
-    withTmp((directory) => {
-      const outside = `${directory}-outside`
-      return Effect.gen(function* () {
-        if (process.platform === "win32") return
-        yield* Effect.promise(async () => {
-          await fs.mkdir(outside)
-          await fs.symlink(outside, path.join(directory, "escape"))
-        })
-        const target = yield* (yield* LocationMutation.Service).resolve({ path: path.join("escape", "new.txt") })
-        expect(target).toMatchObject({
-          absolute: path.join(directory, "escape", "new.txt"),
-          resource: "escape/new.txt",
-        })
-        expect(target.externalDirectory).toBeUndefined()
-        yield* Effect.promise(() => fs.rm(outside, { recursive: true, force: true }))
-      }).pipe(provide(directory))
-    }),
+  it.live("canonicalizes a prospective target below an external symlink", () =>
+    withTmp((directory) =>
+      withTmp((outside) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() =>
+            fs.symlink(outside, path.join(directory, "escape"), process.platform === "win32" ? "junction" : undefined),
+          )
+          const target = yield* (yield* LocationMutation.Service).resolve({ path: path.join("escape", "new.txt") })
+          const canonical = path.join(yield* Effect.promise(() => fs.realpath(outside)), "new.txt")
+          expect(target).toMatchObject({
+            absolute: path.join(directory, "escape", "new.txt"),
+            canonical,
+            resource: canonical.replaceAll("\\", "/"),
+            externalDirectory: {
+              directory: path.dirname(canonical),
+              resource: path.join(path.dirname(canonical), "*").replaceAll("\\", "/"),
+            },
+          })
+        }).pipe(provide(directory)),
+      ),
+    ),
   )
 
   it.live("follows an in-location symlink using ordinary filesystem semantics", () =>
     withTmp((directory) =>
       Effect.gen(function* () {
-        if (process.platform === "win32") return
         yield* Effect.promise(async () => {
           await fs.mkdir(path.join(directory, "actual"))
-          await fs.symlink(path.join(directory, "actual"), path.join(directory, "linked"))
+          await fs.symlink(
+            path.join(directory, "actual"),
+            path.join(directory, "linked"),
+            process.platform === "win32" ? "junction" : undefined,
+          )
         })
 
         expect(yield* (yield* LocationMutation.Service).resolve({ path: "linked/new.txt" })).toMatchObject({
           absolute: path.join(directory, "linked", "new.txt"),
-          resource: "linked/new.txt",
+          canonical: path.join(directory, "actual", "new.txt"),
+          resource: "actual/new.txt",
         })
       }).pipe(provide(directory)),
+    ),
+  )
+
+  it.live("follows a dangling final symlink when deriving external authorization", () =>
+    withTmp((directory) =>
+      withTmp((outside) =>
+        Effect.gen(function* () {
+          if (process.platform === "win32") return
+          const canonical = path.join(outside, "prospective.txt")
+          yield* Effect.promise(() => fs.symlink(canonical, path.join(directory, "linked.txt")))
+          const target = yield* (yield* LocationMutation.Service).resolve({ path: "linked.txt", kind: "file" })
+          expect(target).toMatchObject({
+            absolute: path.join(directory, "linked.txt"),
+            canonical,
+            resource: canonical.replaceAll("\\", "/"),
+            externalDirectory: {
+              directory: outside,
+              resource: path.join(outside, "*").replaceAll("\\", "/"),
+            },
+          })
+        }).pipe(provide(directory)),
+      ),
     ),
   )
 

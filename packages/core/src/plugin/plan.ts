@@ -17,6 +17,7 @@ You are in Plan mode. You may optionally create or update plan documents in:
 ${directory}
 
 Do not modify any other files or ask a subagent to do so.
+Shell and script execution are unavailable in Plan mode.
 
 You remain in Plan mode until the user switches agents. If the user asks you to implement changes, do not do so. Tell them they need to switch agents.
 </system-reminder>`
@@ -40,6 +41,9 @@ export const Plugin = define({
         item.description = "Read-only agent for exploring the codebase and planning work before implementation."
         item.mode = "primary"
         item.permissions.push({ action: "question", resource: "*", effect: "allow" })
+        item.permissions.push({ action: "shell", resource: "*", effect: "deny" })
+        item.permissions.push({ action: "script", resource: "*", effect: "deny" })
+        item.permissions.push({ action: "subagent", resource: "*", effect: "deny" })
         item.permissions.push({ action: "edit", resource: "*", effect: "deny" })
         item.permissions.push({ action: "edit", resource: path.join(directory, "*"), effect: "allow" })
         item.permissions.push({ action: "external_directory", resource: path.join(directory, "*"), effect: "allow" })

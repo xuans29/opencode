@@ -45,6 +45,8 @@ export const Info = Schema.Struct({
           hidden: false,
           permissions: [
             { action: "*", resource: "*", effect: "allow" },
+            { action: "shell", resource: "*", effect: "ask" },
+            { action: "script", resource: "*", effect: "ask" },
             { action: "external_directory", resource: "*", effect: "ask" },
             { action: "read", resource: "*.env", effect: "ask" },
             { action: "read", resource: "*.env.*", effect: "ask" },

@@ -11,6 +11,7 @@ import { LocationMutation } from "../../location-mutation.js"
 import { Ripgrep } from "../../ripgrep.js"
 import { RelativePath } from "../../schema.js"
 import { Permission } from "../../permission.js"
+import { ToolOutput } from "../../tool-output.js"
 
 export const name = "glob"
 
@@ -47,6 +48,7 @@ export const Plugin = {
     const location = yield* Location.Service
     const mutation = yield* LocationMutation.Service
     const permission = yield* Permission.Service
+    const toolOutput = yield* ToolOutput.Service
 
     yield* ctx.tool
       .transform((draft) =>
@@ -61,6 +63,16 @@ export const Plugin = {
               const searchPath = input.path === "undefined" || input.path === "null" ? undefined : input.path
               const source = { type: "tool" as const, messageID: context.messageID, id: context.id }
               const target = yield* mutation.resolve({ path: searchPath ?? ".", kind: "directory" })
+              if (
+                (yield* toolOutput.access({
+                  sessionID: context.sessionID,
+                  absolute: target.absolute,
+                  canonical: target.canonical,
+                })) !== "unrelated"
+              )
+                return yield* Effect.fail(
+                  new ToolFailure({ message: "Managed tool output archives cannot be searched or enumerated" }),
+                )
               const external = target.externalDirectory
               if (external)
                 yield* permission.assert({
@@ -82,7 +94,7 @@ export const Plugin = {
                 agent: context.agent,
                 source,
               })
-              const type = yield* Environment.typeFollowing(environment.files, target.absolute).pipe(
+              const type = yield* Environment.typeFollowing(environment.files, target.canonical).pipe(
                 Effect.catchTag("Environment.NotFound", () =>
                   Effect.fail(new ToolFailure({ message: `Search path does not exist: ${searchPath ?? "."}` })),
                 ),
@@ -91,7 +103,7 @@ export const Plugin = {
                 return yield* Effect.fail(
                   new ToolFailure({ message: `Search path is not a directory: ${searchPath ?? "."}` }),
                 )
-              const root = target.absolute
+              const root = target.canonical
               const limit = input.limit ?? FileSystem.DEFAULT_SEARCH_LIMIT
               const entries = yield* ripgrep
                 .glob({

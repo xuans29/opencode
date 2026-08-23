@@ -30,6 +30,7 @@ import { Session } from "@opencode-ai/core/session"
 import { toLLMMessages } from "@opencode-ai/core/session/runner/to-llm-message"
 import { PluginHooks } from "@opencode-ai/core/plugin/hooks"
 import { Tool } from "@opencode-ai/core/tool"
+import { ToolOutput } from "@opencode-ai/core/tool-output"
 import { tempLocationLayer } from "./fixture/location"
 import { makeLocationNode } from "@opencode-ai/util/effect/app-node"
 import { testEffect } from "./lib/effect"
@@ -49,6 +50,7 @@ const readToolNode = makeLocationNode({
     SessionInstructions.node,
     FSUtil.node,
     Location.node,
+    ToolOutput.node,
   ],
 })
 
@@ -82,6 +84,7 @@ const testLayer = AppNodeBuilder.build(
     [Permission.node, permission],
     [Config.node, config],
     [Image.node, imageLayer],
+    [ToolOutput.node, Layer.mock(ToolOutput.Service, { access: () => Effect.succeed("unrelated") })],
   ],
 ) as unknown as Layer.Layer<unknown>
 

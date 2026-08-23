@@ -76,16 +76,17 @@ export const makeMemoryDriver = (): MemoryDriver => {
       const bytes = range === undefined ? node.bytes : node.bytes.subarray(range.offset, range.offset + range.length)
       return Effect.succeed({ info: info(node), bytes: bytes.slice() })
     },
-    write: (value, bytes) =>
+    write: (value, bytes, guard) =>
       Effect.try({
         try: () => {
-          mkdirSync(path.posix.dirname(key(value)))
-          const existing = lookup(value)
-          if (existing?.type === "directory") throw new Error(`Path is a directory: ${value}`)
-          const target = existing?.type === "symlink" ? resolveKey(value, true) : resolveKey(value, false)
+          const target = resolveKey(value, true)
           if (!target) throw new Error(`Cannot resolve symlink: ${value}`)
-          requireParent(target)
-          nodes.set(target, { type: "file", bytes: bytes.slice(), mtimeMs: Date.now() })
+          const expected = guard?.expectedCanonical === undefined ? target : key(guard.expectedCanonical)
+          if (target !== expected) throw new Error(`Mutation target changed after authorization: ${value}`)
+          if (nodes.get(target)?.type === "directory") throw new Error(`Path is a directory: ${value}`)
+          mkdirSync(path.posix.dirname(expected))
+          requireParent(expected)
+          nodes.set(expected, { type: "file", bytes: bytes.slice(), mtimeMs: Date.now() })
         },
         catch: (cause) => failed(value, cause),
       }),
@@ -100,12 +101,17 @@ export const makeMemoryDriver = (): MemoryDriver => {
         .sort((a, b) => a.name.localeCompare(b.name))
       return Effect.succeed(entries)
     },
-    remove: (value) =>
-      Effect.sync(() => {
-        const target = resolveKey(value, false) ?? key(value)
-        for (const entry of nodes.keys()) {
-          if (entry === target || entry.startsWith(`${target}/`)) nodes.delete(entry)
-        }
+    remove: (value, guard) =>
+      Effect.try({
+        try: () => {
+          const target = resolveKey(value, false) ?? key(value)
+          const expected = guard?.expectedEntry === undefined ? target : key(guard.expectedEntry)
+          if (target !== expected) throw new Error(`Mutation entry changed after authorization: ${value}`)
+          for (const entry of nodes.keys()) {
+            if (entry === expected || entry.startsWith(`${expected}/`)) nodes.delete(entry)
+          }
+        },
+        catch: (cause) => failed(value, cause),
       }),
     move: (from, to) => {
       const source = resolveKey(from, false) ?? key(from)

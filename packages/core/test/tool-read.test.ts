@@ -20,6 +20,7 @@ import { ReadToolFileSystem } from "@opencode-ai/core/tool/read-filesystem"
 import { makeLocationNode } from "@opencode-ai/util/effect/app-node"
 import { SessionInstructions } from "@opencode-ai/core/session/instructions"
 import { Environment } from "@opencode-ai/core/environment/index"
+import { ToolOutput } from "@opencode-ai/core/tool-output"
 import { testEffect } from "./lib/effect"
 import { permissionLayer } from "./lib/permission"
 import { toolIdentity, executeTool, registerToolPlugin, toolDefinitions } from "./lib/tool"
@@ -36,6 +37,7 @@ const readToolNode = makeLocationNode({
     SessionInstructions.node,
     FSUtil.node,
     Location.node,
+    ToolOutput.node,
   ],
 })
 
@@ -57,6 +59,8 @@ let readResult: ReadToolFileSystem.FileContent | ReadToolFileSystem.TextPage | R
   mime: "text/plain",
 }
 let readFailure: ReadToolFileSystem.ReadError | undefined
+let canonicalTarget: string | undefined
+let toolOutputAccess: ToolOutput.Access = "unrelated"
 const reader = Layer.succeed(
   ReadToolFileSystem.Service,
   ReadToolFileSystem.Service.of({
@@ -109,12 +113,15 @@ const mutation = Layer.succeed(
   LocationMutation.Service.of({
     resolve: (input) => {
       const absolute = path.resolve(process.cwd(), input.path)
-      const external = path.isAbsolute(input.path) && !FSUtil.contains(process.cwd(), absolute)
-      const resource = external ? absolute.replaceAll("\\", "/") : path.relative(process.cwd(), absolute) || "."
-      const directory = path.dirname(absolute)
+      const canonical = canonicalTarget ?? absolute
+      const external = !FSUtil.contains(process.cwd(), canonical)
+      const resource = external ? canonical.replaceAll("\\", "/") : path.relative(process.cwd(), canonical) || "."
+      const directory = path.dirname(canonical)
       const externalResource = path.join(directory, "*").replaceAll("\\", "/")
       return Effect.succeed({
         absolute,
+        canonical,
+        entry: canonical,
         resource,
         externalDirectory: external
           ? {
@@ -128,6 +135,9 @@ const mutation = Layer.succeed(
     },
   }),
 )
+const toolOutput = Layer.mock(ToolOutput.Service, {
+  access: () => Effect.succeed(toolOutputAccess),
+})
 const unavailableImage = Layer.mock(Image.Service, {
   normalize: () => Effect.fail(new Image.ResizerUnavailableError()),
 })
@@ -141,6 +151,7 @@ const readLayer = (imageLayer: Layer.Layer<Image.Service>) =>
       [LocationMutation.node, mutation],
       [FSUtil.node, testFileSystem],
       [Location.node, locationLayer],
+      [ToolOutput.node, toolOutput],
       [Global.node, Global.layerWith({ data: Global.Path.data })],
     ]),
     // Merge by reference so Config.Test and Image.Service resolve to the memoized instances.
@@ -167,6 +178,8 @@ describe("ReadTool", () => {
       mime: "text/plain",
     }
     readFailure = undefined
+    canonicalTarget = undefined
+    toolOutputAccess = "unrelated"
   })
 
   it.effect("registers, authorizes, and reads through the location filesystem", () =>
@@ -226,6 +239,68 @@ describe("ReadTool", () => {
         { sessionID, action: "read", resources: [external.replaceAll("\\", "/")], save: ["*"] },
       ])
       expect(readCalls).toEqual([{ input: AbsolutePath.make(external), page: { offset: undefined, limit: undefined } }])
+    }),
+  )
+
+  it.effect("uses the canonical target and requires external approval for a workspace symlink escape", () =>
+    Effect.gen(function* () {
+      const registry = yield* Tool.Service
+      canonicalTarget = path.join(path.parse(process.cwd()).root, "external-read", "canonical.txt")
+
+      expect(
+        yield* executeTool(registry, {
+          sessionID,
+          ...toolIdentity,
+          call: { type: "tool-call", id: "call-canonical-read", name: "read", input: { path: "linked.txt" } },
+        }),
+      ).toMatchObject({ status: "completed" })
+      expect(assertions.map((input) => input.action)).toEqual(["external_directory", "read"])
+      expect(readCalls).toEqual([
+        { input: AbsolutePath.make(canonicalTarget), page: { offset: undefined, limit: undefined } },
+      ])
+    }),
+  )
+
+  it.effect("reads only an authorized current-Session tool archive without external approval", () =>
+    Effect.gen(function* () {
+      const registry = yield* Tool.Service
+      canonicalTarget = path.join(path.parse(process.cwd()).root, "managed", "tool-output", "archive")
+      toolOutputAccess = "archive"
+
+      expect(
+        yield* executeTool(registry, {
+          sessionID,
+          ...toolIdentity,
+          call: { type: "tool-call", id: "call-own-archive", name: "read", input: { path: canonicalTarget } },
+        }),
+      ).toMatchObject({ status: "completed" })
+      expect(assertions.map((input) => input.action)).toEqual(["read"])
+      expect(readCalls).toEqual([
+        { input: AbsolutePath.make(canonicalTarget), page: { offset: undefined, limit: undefined } },
+      ])
+    }),
+  )
+
+  it.effect("rejects protected tool-output paths before permissions or filesystem reads", () =>
+    Effect.gen(function* () {
+      const registry = yield* Tool.Service
+      toolOutputAccess = "protected"
+
+      expect(
+        yield* executeTool(registry, {
+          sessionID,
+          ...toolIdentity,
+          call: { type: "tool-call", id: "call-foreign-archive", name: "read", input: { path: "archive" } },
+        }),
+      ).toEqual({
+        status: "error",
+        error: {
+          type: "tool.execution",
+          message: "Managed tool output archives can only be read by the Session that created them",
+        },
+      })
+      expect(assertions).toEqual([])
+      expect(readCalls).toEqual([])
     }),
   )
 

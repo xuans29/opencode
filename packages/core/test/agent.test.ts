@@ -157,7 +157,10 @@ describe("Agent", () => {
       expect(
         Permission.evaluate("external_directory", path.join(global.data, "tool-output", "*"), info?.permissions ?? [])
           .effect,
-      ).toBe("allow")
+      ).toBe("ask")
+      expect(
+        Permission.evaluate("edit", path.join(global.data, "tool-output", "*"), info?.permissions ?? []).effect,
+      ).toBe("deny")
       expect(
         Permission.evaluate("external_directory", path.join(global.config, "*"), info?.permissions ?? []).effect,
       ).toBe("allow")
@@ -195,7 +198,8 @@ describe("Agent", () => {
       ).toBe("allow")
       expect(
         Permission.evaluate("external_directory", path.join(global.data, "tool-output", "*"), permissions).effect,
-      ).toBe("allow")
+      ).toBe("ask")
+      expect(Permission.evaluate("edit", path.join(global.data, "tool-output", "*"), permissions).effect).toBe("deny")
       expect(Permission.evaluate("external_directory", path.join(global.config, "*"), permissions).effect).toBe("allow")
       expect(Permission.evaluate("external_directory", path.join(global.tmp, "*"), permissions).effect).toBe("allow")
       const explore = yield* agent.get(Agent.ID.make("explore"))

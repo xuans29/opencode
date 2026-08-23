@@ -13,6 +13,7 @@ import { Permission } from "@opencode-ai/core/permission"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { Session } from "@opencode-ai/core/session"
 import { Tool } from "@opencode-ai/core/tool"
+import { ToolOutput } from "@opencode-ai/core/tool-output"
 import { EditTool } from "@opencode-ai/core/tool/plugin/edit"
 import { transformEnvironmentFiles } from "./fixture/environment"
 import { location } from "./fixture/location"
@@ -33,6 +34,7 @@ const editToolNode = makeLocationNode({
     Formatter.node,
     Location.node,
     Permission.node,
+    ToolOutput.node,
   ],
 })
 
@@ -43,6 +45,7 @@ let reads = 0
 let denyAction: string | undefined
 let afterRead = (_target: string, _content: Uint8Array): Effect.Effect<void> => Effect.void
 let formatFile = (_target: string): Effect.Effect<boolean> => Effect.succeed(false)
+let toolOutputAccess: ToolOutput.Access = "unrelated"
 
 const permission = permissionLayer({
   assert: (input) =>
@@ -65,6 +68,10 @@ const formatter = Layer.mock(Formatter.Service, {
   file: (target) => formatFile(target),
 })
 
+const toolOutput = Layer.mock(ToolOutput.Service, {
+  access: () => Effect.succeed(toolOutputAccess),
+})
+
 const reset = () => {
   assertions.length = 0
   writes.length = 0
@@ -72,6 +79,7 @@ const reset = () => {
   denyAction = undefined
   afterRead = () => Effect.void
   formatFile = () => Effect.succeed(false)
+  toolOutputAccess = "unrelated"
 }
 
 const withTool = <A, E, R>(directory: string, body: (registry: Tool.Interface) => Effect.Effect<A, E, R>) => {
@@ -99,13 +107,14 @@ const withTool = <A, E, R>(directory: string, body: (registry: Tool.Interface) =
                       ),
                     ),
                   ),
-              write: (target, content) =>
-                Effect.sync(() => writes.push(target)).pipe(Effect.andThen(files.write(target, content))),
+              write: (target, content, guard) =>
+                Effect.sync(() => writes.push(target)).pipe(Effect.andThen(files.write(target, content, guard))),
             })),
           ],
           [Location.node, activeLocation],
           [Formatter.node, formatter],
           [Permission.node, permission],
+          [ToolOutput.node, toolOutput],
         ],
       ),
     ),
@@ -121,6 +130,36 @@ const call = (input: typeof EditTool.Input.Type, id = "call-edit") => ({
 const it = testEffect(Layer.empty)
 
 describe("EditTool", () => {
+  it.live("blocks tool-output targets before permission or filesystem reads", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        toolOutputAccess = "archive"
+        const target = path.join(tmp.path, "protected.txt")
+        return Effect.promise(() => fs.writeFile(target, "before")).pipe(
+          Effect.andThen(
+            withTool(tmp.path, (registry) =>
+              executeTool(registry, call({ path: target, oldString: "before", newString: "after" })),
+            ),
+          ),
+          Effect.andThen((result) =>
+            Effect.sync(() => {
+              expect(result).toMatchObject({
+                status: "error",
+                error: { type: "tool.execution", message: "Tool output archives are read-only" },
+              })
+              expect(assertions).toEqual([])
+              expect(reads).toBe(0)
+              expect(writes).toEqual([])
+            }),
+          ),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("registers and replaces relative exact text through FileMutation once", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -246,32 +285,75 @@ describe("EditTool", () => {
     ),
   )
 
-  it.live("edits an external symlink target with only its in-location permission", () =>
+  it.live("requires external permission before editing through an in-location symlink", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
       ([active, outside]) => {
         reset()
-        if (process.platform === "win32") return Effect.void
         const target = path.join(outside.path, "external.txt")
-        const link = path.join(active.path, "link.txt")
+        const link = path.join(active.path, "linked")
         return Effect.promise(async () => {
           await fs.writeFile(target, "before")
-          await fs.symlink(target, link)
+          await fs.symlink(outside.path, link, process.platform === "win32" ? "junction" : undefined)
         }).pipe(
           Effect.andThen(
             withTool(active.path, (registry) =>
-              executeTool(registry, call({ path: "link.txt", oldString: "before", newString: "after" })),
+              executeTool(registry, call({ path: "linked/external.txt", oldString: "before", newString: "after" })),
             ),
           ),
           Effect.andThen((result) =>
             Effect.sync(() => {
               expect(result.status).toBe("completed")
-              expect(assertions.map((input) => input.action)).toEqual(["edit"])
-              expect(assertions[0]?.resources).toEqual(["link.txt"])
+              expect(assertions.map((input) => input.action)).toEqual(["external_directory", "edit"])
+              expect(assertions[0]?.resources).toEqual([path.join(outside.path, "*").replaceAll("\\", "/")])
+              expect(assertions[1]?.resources).toEqual([target.replaceAll("\\", "/")])
             }),
           ),
           Effect.andThen(Effect.promise(() => fs.readFile(target, "utf8"))),
           Effect.tap((content) => Effect.sync(() => expect(content).toBe("after"))),
+        )
+      },
+      ([active, outside]) =>
+        Effect.promise(() =>
+          Promise.all([active[Symbol.asyncDispose](), outside[Symbol.asyncDispose]()]).then(() => undefined),
+        ),
+    ),
+  )
+
+  it.live("fails closed when an approved symlink target changes before the edit", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
+      ([active, outside]) => {
+        reset()
+        const actual = path.join(active.path, "actual")
+        const link = path.join(active.path, "linked")
+        const internal = path.join(actual, "target.txt")
+        const external = path.join(outside.path, "target.txt")
+        return Effect.promise(async () => {
+          await fs.mkdir(actual)
+          await Promise.all([fs.writeFile(internal, "before"), fs.writeFile(external, "sentinel")])
+          await fs.symlink(actual, link, process.platform === "win32" ? "junction" : undefined)
+        }).pipe(
+          Effect.andThen(
+            withTool(active.path, (registry) => {
+              afterRead = () =>
+                reads === 1
+                  ? Effect.promise(async () => {
+                      await fs.unlink(link)
+                      await fs.symlink(outside.path, link, process.platform === "win32" ? "junction" : undefined)
+                    })
+                  : Effect.void
+              return executeTool(registry, call({ path: "linked/target.txt", oldString: "before", newString: "after" }))
+            }),
+          ),
+          Effect.andThen((result) =>
+            Effect.gen(function* () {
+              expect(result.status).toBe("error")
+              expect(yield* Effect.promise(() => fs.readFile(internal, "utf8"))).toBe("before")
+              expect(yield* Effect.promise(() => fs.readFile(external, "utf8"))).toBe("sentinel")
+              expect(writes).toEqual([])
+            }),
+          ),
         )
       },
       ([active, outside]) =>

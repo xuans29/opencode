@@ -16,6 +16,7 @@ import { Session } from "@opencode-ai/core/session"
 import { GlobTool } from "@opencode-ai/core/tool/plugin/glob"
 import { GrepTool } from "@opencode-ai/core/tool/plugin/grep"
 import { Tool } from "@opencode-ai/core/tool"
+import { ToolOutput } from "@opencode-ai/core/tool-output"
 import { location } from "./fixture/location"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
@@ -25,12 +26,28 @@ import { executeTool, registerToolPlugin, toolIdentity } from "./lib/tool"
 const globToolNode = makeLocationNode({
   name: "test/glob-tool-plugin",
   layer: Layer.effectDiscard(registerToolPlugin(GlobTool.Plugin)),
-  deps: [Tool.node, Environment.node, Ripgrep.node, Location.node, LocationMutation.node, Permission.node],
+  deps: [
+    Tool.node,
+    Environment.node,
+    Ripgrep.node,
+    Location.node,
+    LocationMutation.node,
+    Permission.node,
+    ToolOutput.node,
+  ],
 })
 const grepToolNode = makeLocationNode({
   name: "test/grep-tool-plugin",
   layer: Layer.effectDiscard(registerToolPlugin(GrepTool.Plugin)),
-  deps: [Tool.node, Environment.node, Ripgrep.node, Location.node, LocationMutation.node, Permission.node],
+  deps: [
+    Tool.node,
+    Environment.node,
+    Ripgrep.node,
+    Location.node,
+    LocationMutation.node,
+    Permission.node,
+    ToolOutput.node,
+  ],
 })
 const sessionID = Session.ID.make("ses_search_tool_test")
 
@@ -38,6 +55,8 @@ const withTools = <A, E, R>(
   directory: string,
   body: (registry: Tool.Interface) => Effect.Effect<A, E, R>,
   assertions?: Permission.AssertInput[],
+  deniedAction?: string,
+  toolOutputAccess: ToolOutput.Access = "unrelated",
 ) =>
   Effect.gen(function* () {
     return yield* body(yield* Tool.Service)
@@ -54,9 +73,22 @@ const withTools = <A, E, R>(
             assert: (input) =>
               Effect.sync(() => {
                 assertions?.push(input)
-              }),
+              }).pipe(
+                Effect.andThen(
+                  input.action === deniedAction
+                    ? Effect.fail(
+                        new Permission.BlockedError({
+                          rules: [],
+                          permission: input.action,
+                          resources: input.resources,
+                        }),
+                      )
+                    : Effect.void,
+                ),
+              ),
           }),
         ],
+        [ToolOutput.node, Layer.mock(ToolOutput.Service, { access: () => Effect.succeed(toolOutputAccess) })],
       ]),
     ),
   )
@@ -275,6 +307,38 @@ describe("search tools", () => {
     )
   }
 
+  for (const name of ["glob", "grep"] as const) {
+    it.live(`${name} rejects protected tool-output search roots before authorization`, () =>
+      Effect.acquireUseRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => {
+          const assertions: Permission.AssertInput[] = []
+          return withTools(
+            tmp.path,
+            (registry) => executeTool(registry, call(name, { path: ".", pattern: name === "glob" ? "*" : "needle" })),
+            assertions,
+            undefined,
+            "protected",
+          ).pipe(
+            Effect.tap((result) =>
+              Effect.sync(() => {
+                expect(result).toEqual({
+                  status: "error",
+                  error: {
+                    type: "tool.execution",
+                    message: "Managed tool output archives cannot be searched or enumerated",
+                  },
+                })
+                expect(assertions).toEqual([])
+              }),
+            ),
+          )
+        },
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      ),
+    )
+  }
+
   it.live("reports a file used as the glob search path", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -325,31 +389,45 @@ describe("search tools", () => {
     ),
   )
 
-  it.live("globs through an in-location external symlink without external approval", () =>
+  it.live("requires external approval before searching through a workspace symlink escape", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
       ([active, outside]) => {
-        if (process.platform === "win32") return Effect.void
         const assertions: Permission.AssertInput[] = []
         return Effect.promise(async () => {
           await fs.writeFile(path.join(outside.path, "outside.txt"), "outside\n")
-          await fs.symlink(outside.path, path.join(active.path, "linked"))
+          await fs.symlink(
+            outside.path,
+            path.join(active.path, "linked"),
+            process.platform === "win32" ? "junction" : undefined,
+          )
         }).pipe(
           Effect.andThen(
             withTools(
               active.path,
-              (registry) => executeTool(registry, call("glob", { path: "linked", pattern: "*.txt" })),
+              (registry) =>
+                Effect.gen(function* () {
+                  const glob = yield* executeTool(registry, call("glob", { path: "linked", pattern: "*.txt" }))
+                  const grep = yield* executeTool(registry, call("grep", { path: "linked", pattern: "outside" }))
+                  return { glob, grep }
+                }),
               assertions,
+              "external_directory",
             ),
           ),
           Effect.tap((result) =>
             Effect.sync(() => {
-              expect(result.status).toBe("completed")
-              expect(assertions.map((input) => input.action)).toEqual(["glob"])
-              expect(result).toMatchObject({
-                output: [{ path: path.join("linked", "outside.txt"), type: "file" }],
-                content: [{ type: "text", text: path.join(active.path, "linked", "outside.txt") }],
+              expect(result.glob).toMatchObject({
+                status: "error",
+                error: { type: "permission.rejected", message: "Permission denied: external_directory" },
               })
+              expect(result.grep).toMatchObject({
+                status: "error",
+                error: { type: "permission.rejected", message: "Permission denied: external_directory" },
+              })
+              expect(assertions.map((input) => input.action)).toEqual(["external_directory", "external_directory"])
+              expect(assertions[0]?.resources).toEqual([path.join(outside.path, "*").replaceAll("\\", "/")])
+              expect(assertions[1]?.resources).toEqual([path.join(outside.path, "*").replaceAll("\\", "/")])
             }),
           ),
         )

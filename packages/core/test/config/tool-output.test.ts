@@ -9,12 +9,15 @@ import { ToolOutput } from "@opencode-ai/core/tool-output"
 import { Document, Event, Info } from "@opencode-ai/schema/config"
 import { ConfigToolOutput } from "@opencode-ai/schema/config/tool-output"
 import { Global } from "@opencode-ai/util/global"
+import { Session } from "@opencode-ai/schema/session"
 import { Effect } from "effect"
 import { tmpdir } from "../fixture/tmpdir"
 import { it } from "../lib/effect"
 import { PluginTestLayer } from "../plugin/fixture"
 
 describe("ConfigToolOutputPlugin.Plugin", () => {
+  const sessionID = Session.ID.create()
+
   it.live("applies limits and reloads changed config", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -26,7 +29,7 @@ describe("ConfigToolOutputPlugin.Plugin", () => {
           const plugins = yield* Plugin.Service
           yield* ConfigToolOutputPlugin.Plugin.effect(yield* PluginHost.make(plugins))
 
-          expect((yield* output.truncate({ content: "one\ntwo" })).metadata?.truncated).toBe(true)
+          expect((yield* output.truncate(sessionID, { content: "one\ntwo" })).metadata?.truncated).toBe(true)
 
           yield* config.setEntries([
             new Document({
@@ -38,7 +41,7 @@ describe("ConfigToolOutputPlugin.Plugin", () => {
           ])
           yield* bus.publish(Event.Updated, {})
           for (let attempt = 0; attempt < 200; attempt++) {
-            const result = yield* output.truncate({ content: "one\ntwo" })
+            const result = yield* output.truncate(sessionID, { content: "one\ntwo" })
             if (result.metadata?.truncated === false) return
             yield* Effect.sleep("10 millis")
           }

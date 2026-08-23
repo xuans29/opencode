@@ -466,7 +466,7 @@ const layer = Layer.effect(
                 ).pipe(
                   // The fiber owns its call: it publishes its own completion, masked so a
                   // finished execution always reaches its durable settlement.
-                  Effect.flatMap(toolOutput.truncate),
+                  Effect.flatMap((outcome) => toolOutput.truncate(sessionID, outcome)),
                   Effect.flatMap((outcome) => publisher.toolExecution(event.id, event.name, outcome)),
                   Effect.catchTag("Tool.Error", (error) =>
                     publisher.failTool(event.id, toSessionError(error), error.metadata).pipe(Effect.asVoid),

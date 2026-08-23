@@ -11,6 +11,7 @@ import { LocationMutation } from "../../location-mutation.js"
 import { Permission } from "../../permission.js"
 import { Ripgrep } from "../../ripgrep.js"
 import { RelativePath } from "../../schema.js"
+import { ToolOutput } from "../../tool-output.js"
 
 export const name = "grep"
 
@@ -63,6 +64,7 @@ export const Plugin = {
     const location = yield* Location.Service
     const mutation = yield* LocationMutation.Service
     const permission = yield* Permission.Service
+    const toolOutput = yield* ToolOutput.Service
 
     yield* ctx.tool
       .transform((draft) =>
@@ -77,6 +79,16 @@ export const Plugin = {
             Effect.gen(function* () {
               const source = { type: "tool" as const, messageID: context.messageID, id: context.id }
               const target = yield* mutation.resolve({ path: input.path ?? "." })
+              if (
+                (yield* toolOutput.access({
+                  sessionID: context.sessionID,
+                  absolute: target.absolute,
+                  canonical: target.canonical,
+                })) !== "unrelated"
+              )
+                return yield* Effect.fail(
+                  new ToolFailure({ message: "Managed tool output archives cannot be searched or enumerated" }),
+                )
               if (target.externalDirectory)
                 yield* permission.assert({
                   ...LocationMutation.externalDirectoryPermission(target.externalDirectory),
@@ -98,7 +110,7 @@ export const Plugin = {
                 agent: context.agent,
                 source,
               })
-              const root = target.absolute
+              const root = target.canonical
               const type = yield* Environment.typeFollowing(environment.files, root).pipe(
                 Effect.catchTag("Environment.NotFound", () =>
                   Effect.fail(new ToolFailure({ message: `Search path does not exist: ${input.path ?? "."}` })),

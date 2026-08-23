@@ -13,6 +13,7 @@ import { Permission } from "@opencode-ai/core/permission"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { Session } from "@opencode-ai/core/session"
 import { Tool } from "@opencode-ai/core/tool"
+import { ToolOutput } from "@opencode-ai/core/tool-output"
 import { PatchTool } from "@opencode-ai/core/tool/plugin/patch"
 import { transformEnvironmentFiles } from "./fixture/environment"
 import { location } from "./fixture/location"
@@ -33,6 +34,7 @@ const patchToolNode = makeLocationNode({
     Formatter.node,
     Location.node,
     Permission.node,
+    ToolOutput.node,
   ],
 })
 
@@ -46,6 +48,7 @@ let readsBeforeEditApproval = 0
 let editApproved = false
 let afterEditApproval = (): Effect.Effect<void> => Effect.void
 let formatFile = (_target: string): Effect.Effect<boolean> => Effect.succeed(false)
+let toolOutputAccess: ToolOutput.Access = "unrelated"
 
 const permission = permissionLayer({
   assert: (input) =>
@@ -72,6 +75,10 @@ const formatter = Layer.mock(Formatter.Service, {
   file: (target) => formatFile(target),
 })
 
+const toolOutput = Layer.mock(ToolOutput.Service, {
+  access: () => Effect.succeed(toolOutputAccess),
+})
+
 const reset = () => {
   assertions.length = 0
   denyAction = undefined
@@ -82,6 +89,7 @@ const reset = () => {
   editApproved = false
   afterEditApproval = () => Effect.void
   formatFile = () => Effect.succeed(false)
+  toolOutputAccess = "unrelated"
 }
 
 const withTool = <A, E, R>(
@@ -107,23 +115,24 @@ const withTool = <A, E, R>(
               Effect.sync(() => {
                 if (!editApproved) readsBeforeEditApproval++
               }).pipe(Effect.andThen(files.read(target, range))),
-            remove: (target) => {
+            remove: (target, guard) => {
               if (failRemoveTarget && path.basename(target) === failRemoveTarget)
                 return Effect.die("forced remove failure")
               if (failRemoveErrorTarget && path.basename(target) === failRemoveErrorTarget)
                 return Effect.fail(new Environment.Failed({ path: target, cause: new Error("forced remove failure") }))
-              return files.remove(target)
+              return files.remove(target, guard)
             },
-            write: (target, content) => {
+            write: (target, content, guard) => {
               if (failWriteTarget && path.basename(target) === failWriteTarget)
                 return Effect.fail(new Environment.Failed({ path: target, cause: new Error("forced write failure") }))
-              return files.write(target, content)
+              return files.write(target, content, guard)
             },
           })),
         ],
         [Location.node, activeLocation],
         [Formatter.node, formatter],
         [Permission.node, permission],
+        [ToolOutput.node, toolOutput],
       ]),
     ),
   )
@@ -154,6 +163,38 @@ const withTempTool = <A, E, R>(body: (directory: string, registry: Tool.Interfac
   )
 
 describe("PatchTool", () => {
+  it.live("blocks tool-output targets before permission or filesystem reads", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        toolOutputAccess = "protected"
+        const target = path.join(tmp.path, "protected.txt")
+        return Effect.promise(() => fs.writeFile(target, "before\n")).pipe(
+          Effect.andThen(
+            withTool(tmp.path, (registry) =>
+              executeTool(
+                registry,
+                call("*** Begin Patch\n*** Update File: protected.txt\n@@\n-before\n+after\n*** End Patch"),
+              ),
+            ),
+          ),
+          Effect.andThen((result) =>
+            Effect.sync(() => {
+              expect(result).toMatchObject({
+                status: "error",
+                error: { type: "tool.execution", message: "Tool output archives are read-only" },
+              })
+              expect(assertions).toEqual([])
+              expect(readsBeforeEditApproval).toBe(0)
+            }),
+          ),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("registers and sequentially applies add, update, and delete hunks", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -953,29 +994,75 @@ describe("PatchTool", () => {
     ),
   )
 
-  it.live("follows an internal symlink to an external file without external permission", () =>
+  it.live("requires external permission before patching through an in-location symlink", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
       ([active, outside]) => {
         reset()
-        if (process.platform === "win32") return Effect.void
         const target = path.join(outside.path, "external.txt")
-        const link = path.join(active.path, "link.txt")
+        const link = path.join(active.path, "linked")
         return Effect.promise(() => fs.writeFile(target, "before\n")).pipe(
-          Effect.andThen(Effect.promise(() => fs.symlink(target, link))),
+          Effect.andThen(
+            Effect.promise(() => fs.symlink(outside.path, link, process.platform === "win32" ? "junction" : undefined)),
+          ),
           Effect.andThen(
             withTool(active.path, (registry) =>
               Effect.gen(function* () {
                 expect(
                   yield* executeTool(
                     registry,
-                    call("*** Begin Patch\n*** Update File: link.txt\n@@\n-before\n+after\n*** End Patch"),
+                    call("*** Begin Patch\n*** Update File: linked/external.txt\n@@\n-before\n+after\n*** End Patch"),
                   ),
                 ).toMatchObject({ status: "completed" })
-                expect(assertions.map((input) => input.action)).toEqual(["edit"])
+                expect(assertions.map((input) => input.action)).toEqual(["external_directory", "edit"])
+                expect(assertions[0]?.resources).toEqual([path.join(outside.path, "*").replaceAll("\\", "/")])
+                expect(assertions[1]?.resources).toEqual([target.replaceAll("\\", "/")])
                 expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after\n")
               }),
             ),
+          ),
+        )
+      },
+      ([active, outside]) =>
+        Effect.promise(() =>
+          Promise.all([active[Symbol.asyncDispose](), outside[Symbol.asyncDispose]()]).then(() => undefined),
+        ),
+    ),
+  )
+
+  it.live("fails closed when an approved symlink target changes before patch commit", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
+      ([active, outside]) => {
+        reset()
+        const actual = path.join(active.path, "actual")
+        const link = path.join(active.path, "linked")
+        const internal = path.join(actual, "target.txt")
+        const external = path.join(outside.path, "target.txt")
+        return Effect.promise(async () => {
+          await fs.mkdir(actual)
+          await Promise.all([fs.writeFile(internal, "before\n"), fs.writeFile(external, "sentinel\n")])
+          await fs.symlink(actual, link, process.platform === "win32" ? "junction" : undefined)
+        }).pipe(
+          Effect.andThen(
+            withTool(active.path, (registry) => {
+              afterEditApproval = () =>
+                Effect.promise(async () => {
+                  await fs.unlink(link)
+                  await fs.symlink(outside.path, link, process.platform === "win32" ? "junction" : undefined)
+                })
+              return executeTool(
+                registry,
+                call("*** Begin Patch\n*** Update File: linked/target.txt\n@@\n-before\n+after\n*** End Patch"),
+              )
+            }),
+          ),
+          Effect.andThen((result) =>
+            Effect.gen(function* () {
+              expect(result.status).toBe("error")
+              expect(yield* Effect.promise(() => fs.readFile(internal, "utf8"))).toBe("before\n")
+              expect(yield* Effect.promise(() => fs.readFile(external, "utf8"))).toBe("sentinel\n")
+            }),
           ),
         )
       },

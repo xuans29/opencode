@@ -13,6 +13,7 @@ import { Location } from "../../location.js"
 import { LocationMutation } from "../../location-mutation.js"
 import { Patch } from "@opencode-ai/util/patch"
 import { Permission } from "../../permission.js"
+import { ToolOutput } from "../../tool-output.js"
 import DESCRIPTION from "../patch.txt"
 import { fileDiff } from "./file-diff.js"
 
@@ -73,6 +74,7 @@ export const Plugin = {
     const formatter = yield* Formatter.Service
     const location = yield* Location.Service
     const permission = yield* Permission.Service
+    const toolOutput = yield* ToolOutput.Service
 
     yield* ctx.tool
       .transform((draft) =>
@@ -114,6 +116,14 @@ export const Plugin = {
               const updates = new Map<string, string>()
               const resolveTarget = Effect.fnUntraced(function* (value: string) {
                 const target = yield* mutation.resolve({ path: value, kind: "file" })
+                if (
+                  (yield* toolOutput.access({
+                    sessionID: context.sessionID,
+                    absolute: target.absolute,
+                    canonical: target.canonical,
+                  })) !== "unrelated"
+                )
+                  return yield* new ToolFailure({ message: "Tool output archives are read-only" })
                 if (!target.externalDirectory) return target
                 yield* permission.assert({
                   ...LocationMutation.externalDirectoryPermission(target.externalDirectory),
@@ -143,7 +153,7 @@ export const Plugin = {
                     return
                   }
                   if (hunk.type === "delete") {
-                    const content = yield* FileMutation.readText(environment.files, target.absolute).pipe(
+                    const content = yield* FileMutation.readText(environment.files, target).pipe(
                       Effect.mapError(
                         (error) =>
                           new ToolFailure({
@@ -158,7 +168,7 @@ export const Plugin = {
                   const original =
                     previous ??
                     (yield* Effect.gen(function* () {
-                      const content = yield* FileMutation.readText(environment.files, target.absolute).pipe(
+                      const content = yield* FileMutation.readText(environment.files, target).pipe(
                         Effect.mapError(
                           (error) =>
                             new ToolFailure({
@@ -216,8 +226,8 @@ export const Plugin = {
                 (change) =>
                   Effect.gen(function* () {
                     if (change.type === "add") {
-                      yield* environment.files
-                        .write(change.target.absolute, new TextEncoder().encode(change.content))
+                      yield* fileMutation
+                        .write({ target: change.target, content: change.content })
                         .pipe(Effect.mapError((error) => fail(`Failed to write ${change.target.resource}`, error)))
                       applied.push({
                         type: change.type,
@@ -227,8 +237,8 @@ export const Plugin = {
                       return
                     }
                     if (change.type === "delete") {
-                      yield* environment.files
-                        .remove(change.target.absolute)
+                      yield* fileMutation
+                        .remove(change.target)
                         .pipe(Effect.mapError((error) => fail(`Failed to delete ${change.target.resource}`, error)))
                       applied.push({
                         type: change.type,
@@ -239,11 +249,11 @@ export const Plugin = {
                     }
                     if (change.moveTarget) {
                       const moveTarget = change.moveTarget
-                      yield* environment.files
-                        .write(moveTarget.absolute, new TextEncoder().encode(change.content))
+                      yield* fileMutation
+                        .write({ target: moveTarget, content: change.content })
                         .pipe(Effect.mapError((error) => fail(`Failed to write ${moveTarget.resource}`, error)))
-                      yield* environment.files
-                        .remove(change.target.absolute)
+                      yield* fileMutation
+                        .remove(change.target)
                         .pipe(
                           Effect.mapError((error) =>
                             fail(`Wrote ${moveTarget.resource} but failed to remove ${change.target.resource}`, error),
@@ -256,8 +266,8 @@ export const Plugin = {
                       })
                       return
                     }
-                    yield* environment.files
-                      .write(change.target.absolute, new TextEncoder().encode(change.content))
+                    yield* fileMutation
+                      .write({ target: change.target, content: change.content })
                       .pipe(Effect.mapError((error) => fail(`Failed to write ${change.target.resource}`, error)))
                     applied.push({
                       type: change.type,
@@ -268,18 +278,20 @@ export const Plugin = {
                 { discard: true },
               )
               const formatted = new Map<string, string>()
+              const resolvedTargets = new Map(targets.map((target) => [target.absolute, target]))
               yield* Effect.forEach(
                 [...new Set(applied.filter((item) => item.type !== "delete").map((item) => item.target))],
-                (target) =>
+                (absolute) =>
                   Effect.gen(function* () {
+                    const target = resolvedTargets.get(absolute)!
                     const current = yield* FileMutation.readText(environment.files, target).pipe(
-                      Effect.mapError((error) => fail(`Failed to read ${target}`, error)),
+                      Effect.mapError((error) => fail(`Failed to read ${absolute}`, error)),
                     )
                     formatted.set(
-                      target,
-                      (yield* formatter.file(target))
+                      absolute,
+                      (yield* formatter.file(target.canonical))
                         ? yield* FileMutation.syncTextBom(environment.files, target, current.bom).pipe(
-                            Effect.mapError((error) => fail(`Failed to sync ${target}`, error)),
+                            Effect.mapError((error) => fail(`Failed to sync ${absolute}`, error)),
                           )
                         : current.text,
                     )
