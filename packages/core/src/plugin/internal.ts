@@ -53,6 +53,7 @@ import { Ripgrep } from "../ripgrep.js"
 import { SessionCompaction } from "../session/compaction.js"
 import { SessionInstructions } from "../session/instructions.js"
 import { Shell } from "../shell.js"
+import { Sandbox } from "../sandbox/service.js"
 import { ShellSelect } from "../shell/select.js"
 import { Snapshot } from "../snapshot.js"
 import { Skill } from "../skill.js"
@@ -66,6 +67,7 @@ import { QuestionTool } from "../tool/plugin/question.js"
 import { ReadToolFileSystem } from "../tool/read-filesystem.js"
 import { ReadTool } from "../tool/plugin/read.js"
 import { ShellTool } from "../tool/plugin/shell.js"
+import { ScriptTool } from "../tool/plugin/script.js"
 import { SkillTool } from "../tool/plugin/skill.js"
 import { SubagentTool } from "../tool/plugin/subagent.js"
 import { Tool } from "../tool.js"
@@ -124,6 +126,7 @@ const services = Effect.fn("PluginInternal.services")(function* () {
   const compaction = yield* SessionCompaction.Service
   const instructions = yield* SessionInstructions.Service
   const shell = yield* Shell.Service
+  const sandbox = yield* Sandbox.Service
   const shellSelect = yield* ShellSelect.Service
   const snapshot = yield* Snapshot.Service
   const skill = yield* Skill.Service
@@ -168,6 +171,7 @@ const services = Effect.fn("PluginInternal.services")(function* () {
     Context.make(SessionCompaction.Service, compaction),
     Context.make(SessionInstructions.Service, instructions),
     Context.make(Shell.Service, shell),
+    Context.make(Sandbox.Service, sandbox),
     Context.make(ShellSelect.Service, shellSelect),
     Context.make(Snapshot.Service, snapshot),
     Context.make(Skill.Service, skill),
@@ -219,6 +223,7 @@ export const requirements = LayerNode.group([
   SessionCompaction.node,
   SessionInstructions.node,
   Shell.node,
+  Sandbox.node,
   ShellSelect.node,
   Snapshot.node,
   Skill.node,
@@ -248,6 +253,7 @@ const pre = [
   GrepTool.Plugin,
   QuestionTool.Plugin,
   ReadTool.Plugin,
+  ScriptTool.Plugin,
   ShellTool.Plugin,
   SkillTool.Plugin,
   SubagentTool.Plugin,

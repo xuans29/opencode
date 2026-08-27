@@ -18,6 +18,7 @@ import type { ShellCreateBefore } from "@opencode-ai/plugin/effect/shell"
 import { PluginHooks } from "./plugin/hooks.js"
 import { SessionEnvironment } from "./session/environment.js"
 import { SessionSchema } from "./session/schema.js"
+import type { PreparedProcess } from "./sandbox/types.js"
 
 export class NotFoundError extends Schema.TaggedError<NotFoundError>()("Shell.NotFoundError", {
   id: Shell.ID,
@@ -29,7 +30,7 @@ const EXITED_LIMIT = 25
 export const RETENTION = Duration.days(7)
 export const DIRECTORY = "shell"
 
-type Info = Shell.Info
+export type Info = Shell.Info
 
 type Active = {
   // Immutable snapshot; lifecycle updates replace it via immer `produce`.
@@ -57,6 +58,12 @@ export interface Interface {
     input: Shell.CreateInput,
     before?: (input: ShellCreateBefore) => Effect.Effect<void, E, R>,
   ) => Effect.Effect<Shell.Info, E | AppProcess.AppProcessError, R>
+  readonly createProcess: (input: {
+    readonly command: string
+    readonly process: PreparedProcess
+    readonly timeout: number
+    readonly metadata?: Shell.Metadata
+  }) => Effect.Effect<Shell.Info, AppProcess.AppProcessError>
   // Currently running commands only; exited shells are retained for get/output but excluded here.
   readonly list: () => Effect.Effect<Shell.Info[]>
   readonly get: (id: Shell.ID) => Effect.Effect<Shell.Info, NotFoundError>
@@ -217,39 +224,25 @@ const layer = () =>
         }
       })
 
-      const create = Effect.fn("Shell.create")(function* <E = never, R = never>(
-        input: Shell.CreateInput,
-        before?: (input: ShellCreateBefore) => Effect.Effect<void, E, R>,
-      ) {
-        const sessionID = input.metadata?.sessionID
-        const sessionEnvironment =
-          location.workspaceID === undefined && Schema.is(SessionSchema.ID)(sessionID)
-            ? yield* environments.get(sessionID)
-            : undefined
-        const invocation: ShellCreateBefore = {
-          command: input.command,
-          cwd: input.cwd ?? location.directory,
-          timeout: input.timeout,
-          shell: yield* shell.preferred(),
-          env: {
-            ...(sessionEnvironment ?? process.env),
-            TERM: "xterm-256color",
-            OPENCODE_TERMINAL: "1",
-          },
-        }
-        yield* hooks.trigger("shell", "create.before", invocation)
-        if (before) yield* before(invocation)
-
+      const launch = Effect.fn("Shell.launch")(function* (input: {
+        readonly command: string
+        readonly cwd: string
+        readonly timeout: number
+        readonly shell: string
+        readonly executable: string
+        readonly args: readonly string[]
+        readonly env: Readonly<Record<string, string | undefined>>
+        readonly metadata?: Shell.Metadata
+      }) {
         const id = Shell.ID.ascending()
-        const args = ShellSelect.args(invocation.shell, invocation.command)
         const file = path.join(outputDir, `${id}.out`)
 
         const info: Info = {
           id,
           status: "running",
-          command: invocation.command,
-          cwd: invocation.cwd,
-          shell: invocation.shell,
+          command: input.command,
+          cwd: input.cwd,
+          shell: input.shell,
           file,
           metadata: input.metadata ?? {},
           time: { started: Date.now() },
@@ -264,17 +257,15 @@ const layer = () =>
             Effect.gen(function* () {
               const handle = yield* environment.spawner
                 .spawn(
-                  ChildProcess.make(invocation.shell, args, {
-                    cwd: invocation.cwd,
-                    env: invocation.env,
+                  ChildProcess.make(input.executable, [...input.args], {
+                    cwd: input.cwd,
+                    env: { ...input.env },
                     stdin: "ignore",
                     detached: process.platform !== "win32",
                     forceKillAfter: Duration.seconds(3),
                   }),
                 )
-                .pipe(
-                  Effect.mapError((cause) => new AppProcess.AppProcessError({ command: invocation.command, cause })),
-                )
+                .pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })))
               const session: Active = {
                 info: produce(info, (draft) => {
                   draft.pid = handle.pid
@@ -361,7 +352,7 @@ const layer = () =>
                   )
                 })
 
-              yield* session.timeout(invocation.timeout)
+              yield* session.timeout(input.timeout)
 
               runFork(
                 handle.exitCode.pipe(
@@ -383,7 +374,59 @@ const layer = () =>
         return session.info
       })
 
-      return Service.of({ name, create, list, get, wait, timeout, output, remove })
+      const create = Effect.fn("Shell.create")(function* <E = never, R = never>(
+        input: Shell.CreateInput,
+        before?: (input: ShellCreateBefore) => Effect.Effect<void, E, R>,
+      ) {
+        const sessionID = input.metadata?.sessionID
+        const sessionEnvironment =
+          location.workspaceID === undefined && Schema.is(SessionSchema.ID)(sessionID)
+            ? yield* environments.get(sessionID)
+            : undefined
+        const invocation: ShellCreateBefore = {
+          command: input.command,
+          cwd: input.cwd ?? location.directory,
+          timeout: input.timeout,
+          shell: yield* shell.preferred(),
+          env: {
+            ...(sessionEnvironment ?? process.env),
+            TERM: "xterm-256color",
+            OPENCODE_TERMINAL: "1",
+          },
+        }
+        yield* hooks.trigger("shell", "create.before", invocation)
+        if (before) yield* before(invocation)
+        return yield* launch({
+          command: invocation.command,
+          cwd: invocation.cwd,
+          timeout: invocation.timeout,
+          shell: invocation.shell,
+          executable: invocation.shell,
+          args: ShellSelect.args(invocation.shell, invocation.command),
+          env: invocation.env,
+          metadata: input.metadata,
+        })
+      })
+
+      const createProcess = Effect.fn("Shell.createProcess")(function* (input: {
+        readonly command: string
+        readonly process: PreparedProcess
+        readonly timeout: number
+        readonly metadata?: Shell.Metadata
+      }) {
+        return yield* launch({
+          command: input.command,
+          cwd: input.process.cwd,
+          timeout: input.timeout,
+          shell: input.process.executable,
+          executable: input.process.executable,
+          args: input.process.args,
+          env: input.process.env,
+          metadata: input.metadata,
+        })
+      })
+
+      return Service.of({ name, create, createProcess, list, get, wait, timeout, output, remove })
     }),
   )
 

@@ -42,6 +42,7 @@ import { SessionTitle } from "./session/title.js"
 import { Skill } from "./skill.js"
 import { SkillInstructions } from "./skill/instructions.js"
 import { Snapshot } from "./snapshot.js"
+import { Sandbox } from "./sandbox/service.js"
 import { InstructionDiscovery } from "./instruction-discovery.js"
 import { InstructionBuiltIns } from "./instructions/builtins.js"
 import { InstructionEntry } from "./session/instruction-entry.js"
@@ -76,6 +77,7 @@ const locationServiceNodes = [
   ShellSelect.node,
   Pty.node,
   Shell.node,
+  Sandbox.node,
   Skill.node,
   InstructionBuiltIns.node,
   InstructionDiscovery.node,

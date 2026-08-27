@@ -3,7 +3,9 @@ import { realpathSync } from "node:fs"
 import os from "os"
 import path from "path"
 import { describe, expect } from "bun:test"
-import { Deferred, Duration, Effect, Fiber, Layer, Scope, Stream } from "effect"
+import { Deferred, Duration, Effect, Fiber, Layer, Scope, Sink, Stream } from "effect"
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
+import { ExitCode, makeHandle, ProcessId } from "effect/unstable/process/ChildProcessSpawner"
 import { Money } from "@opencode-ai/schema/money"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/util/effect/layer-node"
@@ -13,6 +15,7 @@ import { Database } from "@opencode-ai/core/database/database"
 import { Bus } from "@opencode-ai/core/bus"
 import { Config } from "@opencode-ai/core/config"
 import { Environment } from "@opencode-ai/core/environment/index"
+import { EnvironmentUnavailable } from "@opencode-ai/core/environment/unavailable"
 import { FSUtil } from "@opencode-ai/util/fs-util"
 import { Global } from "@opencode-ai/util/global"
 import { Location } from "@opencode-ai/core/location"
@@ -34,6 +37,7 @@ import { PluginSupervisor } from "@opencode-ai/core/plugin/supervisor"
 import { Shell } from "@opencode-ai/core/shell"
 import { Shell as ShellSchema } from "@opencode-ai/schema/shell"
 import { ShellTool } from "@opencode-ai/core/tool/plugin/shell"
+import { Sandbox } from "@opencode-ai/core/sandbox/service"
 import { ToolOutput } from "@opencode-ai/core/tool-output"
 import { Tool } from "@opencode-ai/core/tool"
 import { tmpdir } from "./fixture/tmpdir"
@@ -135,6 +139,7 @@ const shellPluginSupervisor = makeLocationNode({
     LocationMutation.node,
     Permission.node,
     PluginRuntime.node,
+    Sandbox.node,
     Shell.node,
     Tool.node,
   ],
@@ -159,6 +164,66 @@ const replacements = [
 ] satisfies LayerNode.Replacements
 const productionIt = testEffect(AppNodeBuilder.build(nodes, replacements))
 const it = testEffect(AppNodeBuilder.build(nodes, [...replacements, [PluginSupervisor.node, shellPluginSupervisor]]))
+const failedSpawns: ChildProcess.Command[] = []
+const failingEnvironmentNode = makeLocationNode({
+  service: Environment.Service,
+  layer: Layer.sync(Environment.Service, () => {
+    const spawner = ChildProcessSpawner.make((command) => {
+      failedSpawns.push(command)
+      return EnvironmentUnavailable.spawner.spawn(command)
+    })
+    const driver = Environment.makeLocalDriver(spawner)
+    return Environment.Service.of({ files: Environment.makeFiles(driver), spawner })
+  }),
+  deps: [],
+})
+const failingIt = testEffect(AppNodeBuilder.build(nodes, [...replacements, [Environment.node, failingEnvironmentNode]]))
+const fakeSpawns: ChildProcess.Command[] = []
+const fakeProcesses: Array<{
+  readonly stdout?: readonly string[]
+  readonly stderr?: readonly string[]
+  readonly exit?: number
+  readonly pending?: boolean
+}> = []
+let fakeKills = 0
+const fakeEnvironmentNode = makeLocationNode({
+  service: Environment.Service,
+  layer: Layer.sync(Environment.Service, () => {
+    const spawner = ChildProcessSpawner.make((command) => {
+      fakeSpawns.push(command)
+      const process = fakeProcesses.shift()
+      if (!process) return EnvironmentUnavailable.spawner.spawn(command)
+      const exited = Deferred.makeUnsafe<ExitCode>()
+      const stdout = (process.stdout ?? []).map((chunk) => Buffer.from(chunk))
+      const stderr = (process.stderr ?? []).map((chunk) => Buffer.from(chunk))
+      return Effect.succeed(
+        makeHandle({
+          pid: ProcessId(1),
+          stdin: Sink.drain,
+          stdout: Stream.fromIterable(stdout),
+          stderr: Stream.fromIterable(stderr),
+          all: Stream.fromIterable([...stdout, ...stderr]),
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+          isRunning: process.pending
+            ? Deferred.isDone(exited).pipe(Effect.map((done) => !done))
+            : Effect.succeed(false),
+          exitCode: process.pending ? Deferred.await(exited) : Effect.succeed(ExitCode(process.exit ?? 0)),
+          kill: () =>
+            Effect.gen(function* () {
+              fakeKills++
+              yield* Deferred.succeed(exited, ExitCode(143))
+            }),
+          unref: Effect.succeed(Effect.void),
+        }),
+      )
+    })
+    const driver = Environment.makeLocalDriver(spawner)
+    return Environment.Service.of({ files: Environment.makeFiles(driver), spawner })
+  }),
+  deps: [],
+})
+const fakeIt = testEffect(AppNodeBuilder.build(nodes, [...replacements, [Environment.node, fakeEnvironmentNode]]))
 
 const call = (input: typeof ShellTool.Input.Type, id = "call-shell") => ({
   sessionID,
@@ -193,6 +258,9 @@ const progressOverflowCommand = (bytes: number, release: string) =>
   isWindows
     ? `[Console]::Out.Write(('x' * ${bytes})); while (!(Test-Path -LiteralPath '${release}')) { Start-Sleep -Milliseconds 50 }`
     : `head -c ${bytes} /dev/zero | tr '\\0' 'x'; while [ ! -e '${release}' ]; do sleep 0.05; done`
+const directEnvironment = Object.fromEntries(
+  Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+)
 
 const withSession = <A, E, R>(directory: string, body: (registry: Tool.Interface) => Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
@@ -214,6 +282,243 @@ const withSession = <A, E, R>(directory: string, body: (registry: Tool.Interface
   })
 
 describe("ShellTool", () => {
+  failingIt.live("fails closed when the prepared bwrap process cannot spawn", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "test.py"), "print('ok')"))
+          yield* withSession(tmp.path, () =>
+            Effect.gen(function* () {
+              failedSpawns.length = 0
+              const sandbox = yield* Sandbox.Service
+              const error = yield* sandbox
+                .create({
+                  sessionID,
+                  language: "python",
+                  script: "test.py",
+                  timeout: 1_000,
+                  runtime: process.execPath,
+                  bwrap: "fake-bwrap",
+                  env: directEnvironment,
+                })
+                .pipe(Effect.flip)
+              expect(error._tag).toBe("Sandbox.Error")
+              expect(error.message).toContain("Unable to start sandbox process")
+              expect(failedSpawns).toHaveLength(1)
+              const command = failedSpawns[0]
+              expect(command?._tag).toBe("StandardCommand")
+              if (command?._tag === "StandardCommand") {
+                expect(command.command).toBe("fake-bwrap")
+                expect(command.args).toContain("--unshare-net")
+              }
+            }),
+          )
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
+    ),
+  )
+
+  fakeIt.live("captures fake bwrap output and strips sensitive host environment variables", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "test.py"), "print('ok')"))
+          yield* withSession(tmp.path, () =>
+            Effect.gen(function* () {
+              fakeSpawns.length = 0
+              fakeProcesses.length = 0
+              fakeProcesses.push({ stdout: ["fake stdout"], stderr: ["fake stderr"], exit: 7 })
+              const sandbox = yield* Sandbox.Service
+              const shell = yield* Shell.Service
+              const info = yield* sandbox.create({
+                sessionID,
+                language: "python",
+                script: "test.py",
+                timeout: 1_000,
+                runtime: process.execPath,
+                bwrap: "fake-bwrap",
+                env: {
+                  PATH: "safe-path",
+                  HOME: "safe-home",
+                  LANG: "C.UTF-8",
+                  SANDBOX_SECRET_SENTINEL: "secret",
+                  API_KEY: "secret",
+                  TOKEN: "secret",
+                },
+              })
+              const final = yield* shell.wait(info.id)
+              const output = yield* shell.output(info.id)
+              expect(final.status).toBe("exited")
+              expect(final.exit).toBe(7)
+              expect(output.output).toBe("fake stdoutfake stderr")
+              expect(fakeSpawns).toHaveLength(1)
+              const command = fakeSpawns[0]
+              expect(command?._tag).toBe("StandardCommand")
+              if (command?._tag !== "StandardCommand") return
+              expect(command.command).toBe("fake-bwrap")
+              expect(command.options.env).toEqual({ PATH: "safe-path", HOME: "safe-home", LANG: "C.UTF-8" })
+              expect(command.options.env).not.toHaveProperty("SANDBOX_SECRET_SENTINEL")
+              expect(command.options.env).not.toHaveProperty("API_KEY")
+              expect(command.options.env).not.toHaveProperty("TOKEN")
+            }),
+          )
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
+    ),
+  )
+
+  fakeIt.live("times out and kills a pending fake bwrap process", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "test.ts"), "console.log('ok')"))
+          yield* withSession(tmp.path, () =>
+            Effect.gen(function* () {
+              fakeKills = 0
+              fakeSpawns.length = 0
+              fakeProcesses.length = 0
+              fakeProcesses.push({ stdout: ["before timeout"], pending: true })
+              const sandbox = yield* Sandbox.Service
+              const shell = yield* Shell.Service
+              const info = yield* sandbox.create({
+                sessionID,
+                language: "typescript",
+                script: "test.ts",
+                timeout: 25,
+                runtime: process.execPath,
+                bwrap: "fake-bwrap",
+              })
+              expect((yield* shell.wait(info.id)).status).toBe("timeout")
+              expect((yield* shell.output(info.id)).output).toBe("before timeout")
+              expect(fakeSpawns).toHaveLength(1)
+              expect(fakeKills).toBe(1)
+            }),
+          )
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
+    ),
+  )
+
+  failingIt.live("registers ScriptTool and keeps a failed TypeScript sandbox closed", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "test.ts"), "console.log('ok')"))
+          yield* withSession(tmp.path, (registry) =>
+            Effect.gen(function* () {
+              expect((yield* toolDefinitions(registry)).map((tool) => tool.name)).toContain("script")
+              failedSpawns.length = 0
+              const settled = yield* executeTool(registry, {
+                sessionID,
+                ...toolIdentity,
+                call: {
+                  type: "tool-call",
+                  id: "call-script",
+                  name: "script",
+                  input: { language: "typescript", script: "test.ts" },
+                },
+              })
+              expect(settled.status).toBe("error")
+              expect(failedSpawns).toHaveLength(1)
+              const command = failedSpawns[0]
+              expect(command?._tag).toBe("StandardCommand")
+              if (command?._tag === "StandardCommand") expect(command.command).toBe("bwrap")
+            }),
+          )
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
+    ),
+  )
+
+  failingIt.live("routes obvious scripts through bwrap without misrouting text commands", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "test.ts"), "console.log('ok')"))
+          yield* withSession(tmp.path, (registry) =>
+            Effect.gen(function* () {
+              failedSpawns.length = 0
+              const routed = yield* executeTool(registry, call({ command: "bun test.ts" }, "call-routed-script"))
+              expect(routed.status).toBe("error")
+              expect(failedSpawns).toHaveLength(1)
+              expect(failedSpawns[0]?._tag === "StandardCommand" ? failedSpawns[0].command : undefined).toBe("bwrap")
+
+              failedSpawns.length = 0
+              const plain = yield* executeTool(registry, call({ command: "echo python" }, "call-plain-shell"))
+              expect(plain.status).toBe("error")
+              expect(failedSpawns).toHaveLength(1)
+              expect(failedSpawns[0]?._tag === "StandardCommand" ? failedSpawns[0].command : undefined).not.toBe(
+                "bwrap",
+              )
+            }),
+          )
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
+    ),
+  )
+
+  productionIt.live("runs a prepared executable with argv and captures its exit and output", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        withSession(tmp.path, () =>
+          Effect.gen(function* () {
+            const shell = yield* Shell.Service
+            const info = yield* shell.createProcess({
+              command: "direct process test",
+              process: {
+                executable: process.execPath,
+                args: [
+                  "-e",
+                  "console.log('direct-process-ok'); console.error('direct-process-stderr'); process.exit(7)",
+                ],
+                cwd: tmp.path,
+                env: directEnvironment,
+              },
+              timeout: 5_000,
+            })
+            const final = yield* shell.wait(info.id)
+            const output = yield* shell.output(info.id)
+            expect(final.status).toBe("exited")
+            expect(final.exit).toBe(7)
+            expect(output.output).toContain("direct-process-ok")
+            expect(output.output).toContain("direct-process-stderr")
+          }),
+        ),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
+    ),
+  )
+
+  productionIt.live("times out and cleans up a prepared executable", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        withSession(tmp.path, () =>
+          Effect.gen(function* () {
+            const shell = yield* Shell.Service
+            const info = yield* shell.createProcess({
+              command: "direct process timeout test",
+              process: {
+                executable: process.execPath,
+                args: ["-e", "await Bun.sleep(60_000)"],
+                cwd: tmp.path,
+                env: directEnvironment,
+              },
+              timeout: 50,
+            })
+            expect((yield* shell.wait(info.id)).status).toBe("timeout")
+            expect((yield* shell.list()).map((item) => item.id)).not.toContain(info.id)
+          }),
+        ),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
+    ),
+  )
+
   productionIt.live(
     "registers and returns real successful output from the active Location",
     () =>

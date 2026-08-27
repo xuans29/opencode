@@ -3,12 +3,15 @@ export * as ShellTool from "./shell.js"
 import path from "path"
 import { ToolFailure } from "@opencode-ai/ai"
 import type { Context as PluginContext } from "@opencode-ai/plugin/effect/plugin"
+import type { ShellCreateBefore } from "@opencode-ai/plugin/effect/shell"
 import { Deferred, Effect, Schema, Scope } from "effect"
 import { Config } from "../../config.js"
 import { Environment } from "../../environment/index.js"
 import { LocationMutation } from "../../location-mutation.js"
 import { Permission } from "../../permission.js"
 import { PluginRuntime } from "../../plugin/runtime.js"
+import { Sandbox } from "../../sandbox/service.js"
+import { SandboxRouter } from "../../sandbox/router.js"
 import { NonNegativeInt } from "../../schema.js"
 import { SessionSchema } from "../../session/schema.js"
 import { Shell } from "../../shell.js"
@@ -109,6 +112,7 @@ export const Plugin = {
     const environment = yield* Environment.Service
     const mutation = yield* LocationMutation.Service
     const shell = yield* Shell.Service
+    const sandbox = yield* Sandbox.Service
     const permission = yield* Permission.Service
     const config = yield* Config.Service
 
@@ -180,73 +184,93 @@ export const Plugin = {
               }
               const timeout = input.background === true ? (input.timeout ?? 0) : (input.timeout ?? DEFAULT_TIMEOUT_MS)
               let finalTimeout = timeout
-              const info = yield* shell.create(
-                {
-                  command: input.command,
-                  cwd: input.workdir,
-                  timeout,
-                  metadata: { sessionID: context.sessionID },
-                },
-                (invocation) =>
-                  Effect.gen(function* () {
-                    const target = yield* mutation.resolve({ path: invocation.cwd, kind: "directory" })
-                    const unrestricted =
-                      (yield* permission.allowsAll({
-                        sessionID: context.sessionID,
-                        action: name,
-                        agent: context.agent,
-                      })) &&
-                      (yield* permission.allowsAll({
-                        sessionID: context.sessionID,
-                        action: "external_directory",
-                        agent: context.agent,
-                      }))
-                    invocation.cwd = target.absolute
-                    finalTimeout = invocation.timeout
-                    if (!unrestricted) {
-                      const portable =
-                        Config.latest(yield* config.entries(), "experimental")?.portable_shell_scanner === true
-                      const parsed = yield* ShellParse.scan(invocation.command, invocation.shell, target.absolute, {
-                        portable,
-                      })
-                      const directories = yield* Effect.forEach(parsed.directories, (directory) =>
-                        mutation.resolve({ path: path.resolve(target.absolute, directory), kind: "directory" }),
-                      )
-                      const external = [target, ...directories]
-                        .map((item) => item.externalDirectory)
-                        .filter((item) => item !== undefined)
-                        .filter(
-                          (item, index, items) =>
-                            items.findIndex((other) => other.resource === item.resource) === index,
-                        )
-                      if (external.length > 0)
-                        yield* permission.assert({
-                          action: "external_directory",
-                          resources: external.map((item) => item.resource),
-                          save: external.map((item) => item.save),
-                          sessionID: context.sessionID,
-                          agent: context.agent,
-                          source,
-                        })
-                      if (parsed.commands.length > 0)
-                        yield* permission.assert({
-                          action: name,
-                          resources: parsed.commands.map((command) => command.resource),
-                          save: parsed.commands.map((command) => command.save),
-                          sessionID: context.sessionID,
-                          agent: context.agent,
-                          source,
-                        })
-                    }
-                    const workdir = yield* Environment.typeFollowing(environment.files, target.absolute).pipe(
-                      Effect.catchTag("Environment.NotFound", () =>
-                        Effect.fail(new Error(`Working directory does not exist: ${target.absolute}`)),
-                      ),
+              const authorize = Effect.fnUntraced(function* (invocation: ShellCreateBefore) {
+                const target = yield* mutation.resolve({ path: invocation.cwd, kind: "directory" })
+                const unrestricted =
+                  (yield* permission.allowsAll({
+                    sessionID: context.sessionID,
+                    action: name,
+                    agent: context.agent,
+                  })) &&
+                  (yield* permission.allowsAll({
+                    sessionID: context.sessionID,
+                    action: "external_directory",
+                    agent: context.agent,
+                  }))
+                invocation.cwd = target.absolute
+                finalTimeout = invocation.timeout
+                if (!unrestricted) {
+                  const portable =
+                    Config.latest(yield* config.entries(), "experimental")?.portable_shell_scanner === true
+                  const parsed = yield* ShellParse.scan(invocation.command, invocation.shell, target.absolute, {
+                    portable,
+                  })
+                  const directories = yield* Effect.forEach(parsed.directories, (directory) =>
+                    mutation.resolve({ path: path.resolve(target.absolute, directory), kind: "directory" }),
+                  )
+                  const external = [target, ...directories]
+                    .map((item) => item.externalDirectory)
+                    .filter((item) => item !== undefined)
+                    .filter(
+                      (item, index, items) => items.findIndex((other) => other.resource === item.resource) === index,
                     )
-                    if (workdir !== "directory")
-                      return yield* Effect.fail(new Error(`Working directory is not a directory: ${target.absolute}`))
-                  }),
-              )
+                  if (external.length > 0)
+                    yield* permission.assert({
+                      action: "external_directory",
+                      resources: external.map((item) => item.resource),
+                      save: external.map((item) => item.save),
+                      sessionID: context.sessionID,
+                      agent: context.agent,
+                      source,
+                    })
+                  if (parsed.commands.length > 0)
+                    yield* permission.assert({
+                      action: name,
+                      resources: parsed.commands.map((command) => command.resource),
+                      save: parsed.commands.map((command) => command.save),
+                      sessionID: context.sessionID,
+                      agent: context.agent,
+                      source,
+                    })
+                }
+                const workdir = yield* Environment.typeFollowing(environment.files, target.absolute).pipe(
+                  Effect.catchTag("Environment.NotFound", () =>
+                    Effect.fail(new Error(`Working directory does not exist: ${target.absolute}`)),
+                  ),
+                )
+                if (workdir !== "directory")
+                  return yield* Effect.fail(new Error(`Working directory is not a directory: ${target.absolute}`))
+                return undefined
+              })
+              const routed = SandboxRouter.route(input.command)
+              const info = routed
+                ? yield* Effect.gen(function* () {
+                    const invocation: ShellCreateBefore = {
+                      command: input.command,
+                      cwd: input.workdir ?? ".",
+                      timeout,
+                      shell: yield* shell.name(),
+                      env: {},
+                    }
+                    yield* authorize(invocation)
+                    return yield* sandbox.create({
+                      sessionID: context.sessionID,
+                      language: routed.language,
+                      script: routed.script,
+                      args: routed.args,
+                      workdir: invocation.cwd,
+                      timeout: invocation.timeout,
+                    })
+                  })
+                : yield* shell.create(
+                    {
+                      command: input.command,
+                      cwd: input.workdir,
+                      timeout,
+                      metadata: { sessionID: context.sessionID },
+                    },
+                    authorize,
+                  )
               yield* context.progress({ shellID: info.id })
 
               const captureShell = Effect.fnUntraced(function* () {
