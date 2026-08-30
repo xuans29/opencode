@@ -31,7 +31,9 @@ import { SessionStore } from "@opencode-ai/core/session/store"
 import { Permission } from "@opencode-ai/core/permission"
 import { PluginRuntime } from "@opencode-ai/core/plugin/runtime"
 import { PluginSupervisor } from "@opencode-ai/core/plugin/supervisor"
+import { Sandbox } from "@opencode-ai/core/sandbox/service"
 import { Shell } from "@opencode-ai/core/shell"
+import { ShellSelect } from "@opencode-ai/core/shell/select"
 import { Shell as ShellSchema } from "@opencode-ai/schema/shell"
 import { ShellTool } from "@opencode-ai/core/tool/plugin/shell"
 import { ToolOutput } from "@opencode-ai/core/tool-output"
@@ -45,6 +47,7 @@ import { toolIdentity, executeTool, registerToolPlugin, toolDefinitions } from "
 const sessionID = Session.ID.make("ses_shell_tool_test")
 const sessionModel = Model.Ref.make({ id: Model.ID.make("test"), providerID: Provider.ID.make("test") })
 const assertions: Permission.AssertInput[] = []
+const preparedCommands: string[] = []
 const allowedActions = new Set<string>()
 let denyAction: string | undefined
 let afterPermission = (_input: Permission.AssertInput): Effect.Effect<void> => Effect.void
@@ -68,8 +71,29 @@ const permission = permissionLayer({
     ),
 })
 
+const sandbox = makeLocationNode({
+  service: Sandbox.Service,
+  layer: Layer.succeed(
+    Sandbox.Service,
+    Sandbox.Service.of({
+      prepare: (input) =>
+        Effect.sync(() => {
+          preparedCommands.push(input.command)
+          return {
+            executable: input.shell,
+            args: ShellSelect.args(input.shell, input.command),
+            cwd: input.cwd,
+            env: input.env,
+          }
+        }),
+    }),
+  ),
+  deps: [],
+})
+
 const reset = () => {
   assertions.length = 0
+  preparedCommands.length = 0
   allowedActions.clear()
   denyAction = undefined
   afterPermission = () => Effect.void
@@ -135,6 +159,7 @@ const shellPluginSupervisor = makeLocationNode({
     LocationMutation.node,
     Permission.node,
     PluginRuntime.node,
+    Sandbox.node,
     Shell.node,
     Tool.node,
   ],
@@ -155,6 +180,7 @@ const nodes = LayerNode.group([
 const replacements = [
   [SessionExecution.node, executionNode],
   [Permission.node, permission],
+  [Sandbox.node, sandbox],
   [Global.node, tempGlobalLayer],
 ] satisfies LayerNode.Replacements
 const productionIt = testEffect(AppNodeBuilder.build(nodes, replacements))
@@ -215,7 +241,7 @@ const withSession = <A, E, R>(directory: string, body: (registry: Tool.Interface
 
 describe("ShellTool", () => {
   productionIt.live(
-    "registers and returns real successful output from the active Location",
+    "prepares an ordinary command and returns real successful output from the active Location",
     () =>
       Effect.acquireUseRelease(
         Effect.promise(() => tmpdir()),
@@ -237,6 +263,7 @@ describe("ShellTool", () => {
 
               const settled = yield* executeTool(registry, call({ command: helloCommand }))
               expect(settled.status).toBe("completed")
+              expect(preparedCommands).toEqual([helloCommand])
               expect(settled.metadata).toMatchObject({ exit: 0, truncated: false })
               expect(settled.content?.[0]).toEqual({ type: "text", text: "hello" })
               expect(settled.content?.[1]).toMatchObject({
