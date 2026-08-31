@@ -11,6 +11,7 @@ import { LocationMutation } from "../../location-mutation.js"
 import { Permission } from "../../permission.js"
 import { PluginRuntime } from "../../plugin/runtime.js"
 import { NonNegativeInt } from "../../schema.js"
+import { Sandbox } from "../../sandbox/service.js"
 import { SessionSchema } from "../../session/schema.js"
 import { Shell } from "../../shell.js"
 import { ShellParse } from "../../shell/parse.js"
@@ -85,6 +86,7 @@ export const Plugin = {
     const scope = yield* Scope.Scope
     const environment = yield* Environment.Service
     const mutation = yield* LocationMutation.Service
+    const sandbox = yield* Sandbox.Service
     const shell = yield* Shell.Service
     const permission = yield* Permission.Service
     const config = yield* Config.Service
@@ -201,6 +203,7 @@ export const Plugin = {
                     if (workdir !== "directory")
                       return yield* Effect.fail(new Error(`Working directory is not a directory: ${target.absolute}`))
                   }),
+                sandbox.prepare,
               )
               yield* context.progress({ shellID: info.id })
 

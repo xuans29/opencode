@@ -20,6 +20,13 @@ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("She
   id: Shell.ID,
 }) {}
 
+export interface PreparedProcess {
+  readonly executable: string
+  readonly args: readonly string[]
+  readonly cwd: string
+  readonly env: NodeJS.ProcessEnv
+}
+
 // Exited processes stay observable (status, exit code, retained output) until removed explicitly.
 // Cap retention so abandoned commands do not accumulate unbounded state and output files.
 const EXITED_LIMIT = 25
@@ -48,10 +55,11 @@ type Active = {
  */
 export interface Interface {
   readonly name: () => Effect.Effect<string>
-  readonly create: <E = never, R = never>(
+  readonly create: <E = never, R = never, E2 = never, R2 = never>(
     input: Shell.CreateInput,
     before?: (input: ShellCreateBefore) => Effect.Effect<void, E, R>,
-  ) => Effect.Effect<Shell.Info, E | AppProcess.AppProcessError, R>
+    prepare?: (input: PreparedProcess) => Effect.Effect<PreparedProcess, E2, R2>,
+  ) => Effect.Effect<Shell.Info, E | E2 | AppProcess.AppProcessError, R | R2>
   // Currently running commands only; exited shells are retained for get/output but excluded here.
   readonly list: () => Effect.Effect<Shell.Info[]>
   readonly get: (id: Shell.ID) => Effect.Effect<Shell.Info, NotFoundError>
@@ -180,9 +188,10 @@ export const layer = (options?: ShellSelect.Options) =>
         }
       })
 
-      const create = Effect.fn("Shell.create")(function* <E = never, R = never>(
+      const create = Effect.fn("Shell.create")(function* <E = never, R = never, E2 = never, R2 = never>(
         input: Shell.CreateInput,
         before?: (input: ShellCreateBefore) => Effect.Effect<void, E, R>,
+        prepare?: (input: PreparedProcess) => Effect.Effect<PreparedProcess, E2, R2>,
       ) {
         const invocation: ShellCreateBefore = {
           command: input.command,
@@ -200,6 +209,9 @@ export const layer = (options?: ShellSelect.Options) =>
 
         const id = Shell.ID.ascending()
         const args = ShellSelect.args(invocation.shell, invocation.command)
+        const prepared = prepare
+          ? yield* prepare({ executable: invocation.shell, args, cwd: invocation.cwd, env: invocation.env })
+          : { executable: invocation.shell, args, cwd: invocation.cwd, env: invocation.env }
         const file = path.join(outputDir, `${id}.out`)
 
         const info: Info = {
@@ -222,9 +234,9 @@ export const layer = (options?: ShellSelect.Options) =>
             Effect.gen(function* () {
               const handle = yield* environment.spawner
                 .spawn(
-                  ChildProcess.make(invocation.shell, args, {
-                    cwd: invocation.cwd,
-                    env: invocation.env,
+                  ChildProcess.make(prepared.executable, prepared.args, {
+                    cwd: prepared.cwd,
+                    env: prepared.env,
                     stdin: "ignore",
                     detached: process.platform !== "win32",
                     forceKillAfter: Duration.seconds(3),

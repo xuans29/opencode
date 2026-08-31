@@ -39,6 +39,7 @@ import { Permission } from "../permission.js"
 import { Reference } from "../reference.js"
 import { WebSearch } from "../websearch.js"
 import { Ripgrep } from "../ripgrep.js"
+import { Sandbox } from "../sandbox/service.js"
 import { SessionInstructions } from "../session/instructions.js"
 import { Shell } from "../shell.js"
 import { Skill } from "../skill.js"
@@ -102,6 +103,7 @@ const services = Effect.fn("PluginInternal.services")(function* () {
   const reference = yield* Reference.Service
   const websearch = yield* WebSearch.Service
   const ripgrep = yield* Ripgrep.Service
+  const sandbox = yield* Sandbox.Service
   const instructions = yield* SessionInstructions.Service
   const shell = yield* Shell.Service
   const skill = yield* Skill.Service
@@ -139,6 +141,7 @@ const services = Effect.fn("PluginInternal.services")(function* () {
     Context.make(Reference.Service, reference),
     Context.make(WebSearch.Service, websearch),
     Context.make(Ripgrep.Service, ripgrep),
+    Context.make(Sandbox.Service, sandbox),
     Context.make(SessionInstructions.Service, instructions),
     Context.make(Shell.Service, shell),
     Context.make(Skill.Service, skill),
@@ -183,6 +186,7 @@ export const requirements = LayerNode.group([
   Reference.node,
   WebSearch.node,
   Ripgrep.node,
+  Sandbox.node,
   SessionInstructions.node,
   Shell.node,
   Skill.node,

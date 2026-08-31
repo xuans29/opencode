@@ -28,6 +28,7 @@ import { PluginSupervisor } from "./plugin/supervisor.js"
 import { ProjectCopy } from "./project/copy.js"
 import { Pty } from "./pty.js"
 import { Question } from "./question.js"
+import { Sandbox } from "./sandbox/service.js"
 import { Shell } from "./shell.js"
 import { Reference } from "./reference.js"
 import { WebSearch } from "./websearch.js"
@@ -72,6 +73,7 @@ const locationServiceNodes = [
   FileSystem.node,
   Pty.node,
   Shell.node,
+  Sandbox.node,
   Skill.node,
   InstructionBuiltIns.node,
   InstructionDiscovery.node,
