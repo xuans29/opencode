@@ -10,6 +10,7 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
 import { Project } from "@opencode-ai/core/project"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { AbsolutePath } from "@opencode-ai/core/schema"
+import { User } from "@opencode-ai/schema/user"
 import { Global } from "@opencode-ai/util/global"
 import { Effect, Fiber, Layer, Logger, Schedule, Schema, Scope } from "effect"
 import { eq, sql } from "drizzle-orm"
@@ -32,6 +33,7 @@ const session = (
   overrides: Partial<V1Migration.TransformInput["session"]> = {},
 ): V1Migration.TransformInput["session"] => ({
   id: SessionSchema.ID.make("ses_test"),
+  owner_id: User.ID.local,
   project_id: Project.ID.global,
   workspace_id: null,
   parent_id: null,

@@ -166,7 +166,7 @@ function dispatch(
   shutdown: Deferred.Deferred<void>,
   version: string,
 ): App {
-  const auth = ServerAuth.Config.of({ password: Option.some(password), username: "opencode" })
+  const auth = ServerAuth.Config.of({ password: Option.some(password), username: "opencode", users: [] })
   return Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest
     const url = new URL(request.url, "http://localhost")

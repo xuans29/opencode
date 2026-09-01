@@ -181,6 +181,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
       yield* tx.run(`
         CREATE TABLE \`session_v2\` (
           \`id\` text PRIMARY KEY,
+          \`owner_id\` text DEFAULT 'usr_local' NOT NULL,
           \`project_id\` text NOT NULL,
           \`workspace_id\` text,
           \`parent_id\` text,

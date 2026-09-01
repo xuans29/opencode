@@ -20,6 +20,7 @@ import { SessionEvent } from "./event.js"
 import { SessionMessage } from "./message.js"
 import { SessionProjector } from "./projector.js"
 import { SessionMessageTable, SessionTable } from "./sql.js"
+import { User } from "@opencode-ai/schema/user"
 
 export const Data = SessionTransfer.Data
 export type Data = SessionTransfer.Data
@@ -34,7 +35,11 @@ export interface Interface {
     sessionID: Session.ID
     sanitize?: boolean
   }) => Effect.Effect<Data, Session.NotFoundError | Session.MessageDecodeError>
-  readonly import: (input: { data: Data; location: Location.Ref }) => Effect.Effect<Session.Info, ImportConflictError>
+  readonly import: (input: {
+    data: Data
+    location: Location.Ref
+    ownerID?: User.ID
+  }) => Effect.Effect<Session.Info, ImportConflictError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionTransfer") {}
@@ -109,6 +114,7 @@ const layer = Layer.effect(
                   yield* db
                     .update(SessionTable)
                     .set({
+                      owner_id: input.ownerID ?? User.ID.local,
                       cost: input.data.info.cost,
                       tokens_input: input.data.info.tokens.input,
                       tokens_output: input.data.info.tokens.output,

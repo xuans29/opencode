@@ -30,6 +30,7 @@ export interface PreparedProcess {
 // Exited processes stay observable (status, exit code, retained output) until removed explicitly.
 // Cap retention so abandoned commands do not accumulate unbounded state and output files.
 const EXITED_LIMIT = 25
+const MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 
 type Info = Shell.Info
 
@@ -38,6 +39,7 @@ type Active = {
   info: Info
   file: string
   size: number
+  truncated: boolean
   // Resolves with the terminal Info once the command exits, times out, or is killed. A wait
   // started after termination resolves immediately from the already-completed deferred.
   done: Deferred.Deferred<Info, NotFoundError>
@@ -162,7 +164,8 @@ export const layer = (options?: ShellSelect.Options) =>
         const session = yield* require(id)
         const cursor = input?.cursor ?? 0
         const limit = input?.limit ?? 65536
-        if (cursor >= session.size) return { output: "", cursor: session.size, size: session.size, truncated: false }
+        if (cursor >= session.size)
+          return { output: "", cursor: session.size, size: session.size, truncated: session.truncated }
         const start = Math.max(0, cursor)
         const length = Math.min(limit, session.size - start)
         const buffer = Buffer.alloc(length)
@@ -184,7 +187,7 @@ export const layer = (options?: ShellSelect.Options) =>
           output: buffer.subarray(0, bytesRead).toString("utf8"),
           cursor: start + bytesRead,
           size: session.size,
-          truncated: false,
+          truncated: session.truncated,
         }
       })
 
@@ -212,7 +215,13 @@ export const layer = (options?: ShellSelect.Options) =>
         const prepared = prepare
           ? yield* prepare({ executable: invocation.shell, args, cwd: invocation.cwd, env: invocation.env })
           : { executable: invocation.shell, args, cwd: invocation.cwd, env: invocation.env }
-        const file = path.join(outputDir, `${id}.out`)
+        const sessionID = input.metadata?.sessionID
+        const directory =
+          typeof sessionID === "string" && /^ses_[A-Za-z0-9_-]+$/.test(sessionID)
+            ? path.join(outputDir, sessionID)
+            : outputDir
+        yield* Effect.promise(() => mkdir(directory, { recursive: true }))
+        const file = path.join(directory, `${id}.out`)
 
         const info: Info = {
           id,
@@ -251,6 +260,7 @@ export const layer = (options?: ShellSelect.Options) =>
                 }),
                 file,
                 size: 0,
+                truncated: false,
                 done: Deferred.makeUnsafe<Info, NotFoundError>(),
               }
               sessions.set(id, session)
@@ -260,8 +270,15 @@ export const layer = (options?: ShellSelect.Options) =>
               const pump = handle.all.pipe(
                 Stream.runForEach((chunk: Uint8Array) =>
                   Effect.sync(() => {
-                    stream.write(chunk)
-                    session.size += chunk.length
+                    const remaining = MAX_OUTPUT_BYTES - session.size
+                    if (remaining <= 0) {
+                      session.truncated = true
+                      return
+                    }
+                    const retained = chunk.subarray(0, remaining)
+                    stream.write(retained)
+                    session.size += retained.length
+                    if (retained.length < chunk.length) session.truncated = true
                   }),
                 ),
               )

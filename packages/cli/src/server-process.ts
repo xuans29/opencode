@@ -14,6 +14,7 @@ import { Env } from "./env"
 import { ServiceConfig } from "./services/service-config"
 import { Updater } from "./services/updater"
 import { WebUi } from "./services/web-ui"
+import { User } from "@opencode-ai/schema/user"
 
 export type Mode = "default" | "service" | "stdio"
 
@@ -56,6 +57,12 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
       if (incumbent !== undefined) return
       const { start } = yield* Effect.promise(() => import("@opencode-ai/server/process"))
       const environmentPassword = yield* Env.password
+      const environmentUsers = yield* Env.users
+      const users = environmentUsers
+        ? yield* Schema.decodeUnknownEffect(
+            Schema.fromJsonString(Schema.Array(Schema.Struct({ id: User.ID, apiKey: Schema.String }))),
+          )(Redacted.value(environmentUsers))
+        : undefined
       // Keep the lease credential out of the environment inherited by tools.
       if (options.mode === "stdio") {
         delete process.env.OPENCODE_PASSWORD
@@ -80,6 +87,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
           hostname,
           port,
           password,
+          users,
           simulation: truthy(process.env.OPENCODE_SIMULATE),
           database: {
             path:

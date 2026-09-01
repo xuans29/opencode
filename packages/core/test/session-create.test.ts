@@ -31,6 +31,14 @@ import { Workspace } from "@opencode-ai/core/workspace"
 import { testEffect } from "./lib/effect"
 import { globalProjectLayer } from "./lib/project"
 import { tmpdir } from "./fixture/tmpdir"
+import { Sandbox } from "@opencode-ai/core/sandbox/service"
+import { makeLocationNode } from "@opencode-ai/util/effect/app-node"
+
+const sandbox = makeLocationNode({
+  service: Sandbox.Service,
+  layer: Layer.succeed(Sandbox.Service, Sandbox.Service.of({ prepare: Effect.succeed })),
+  deps: [],
+})
 
 const it = testEffect(
   AppNodeBuilder.build(
@@ -46,6 +54,7 @@ const it = testEffect(
       [Bus.node, Bus.configured({ persist: true })],
       [Project.node, globalProjectLayer],
       [SessionExecution.node, SessionExecution.noopLayer],
+      [Sandbox.node, sandbox],
     ],
   ),
 )
@@ -55,6 +64,7 @@ const liveIt = testEffect(
     [
       [Bus.node, Bus.configured({ persist: true })],
       [SessionExecution.node, SessionExecution.noopLayer],
+      [Sandbox.node, sandbox],
     ],
   ),
 )

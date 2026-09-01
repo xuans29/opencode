@@ -19,6 +19,10 @@ import {
   UnknownError,
 } from "@opencode-ai/protocol/errors"
 import { AbsolutePath } from "@opencode-ai/core/schema"
+import { Principal } from "../middleware/authorization"
+import { Database } from "@opencode-ai/core/database/database"
+import { SessionTable } from "@opencode-ai/core/session/sql"
+import { eq } from "drizzle-orm"
 
 const DefaultSessionsLimit = 50
 
@@ -26,6 +30,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
   Effect.gen(function* () {
     const session = yield* Session.Service
     const transfer = yield* SessionTransfer.Service
+    const db = (yield* Database.Service).db
     const pendingMutation = (effect: ReturnType<typeof session.cancelInbox>, conflict: string) =>
       effect.pipe(
         Effect.catchTag(
@@ -47,6 +52,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.list",
         Effect.fn(function* (ctx) {
+          const principal = yield* Principal
           const query =
             ctx.query.cursor !== undefined
               ? yield* SessionsCursor.parse(ctx.query.cursor).pipe(
@@ -55,6 +61,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
               : ctx.query
           const page = yield* session.list({
             ...query,
+            ownerID: principal.userID,
             workspaceID: query.workspace,
             limit: ctx.query.limit ?? DefaultSessionsLimit,
           })
@@ -91,9 +98,11 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.create",
         Effect.fn(function* (ctx) {
+          const principal = yield* Principal
           return {
             data: yield* session
               .create({
+                ownerID: principal.userID,
                 id: ctx.payload.id,
                 title: ctx.payload.title,
                 agent: ctx.payload.agent,
@@ -107,22 +116,25 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.import",
         Effect.fn(function* (ctx) {
-          return {
-            data: yield* transfer
-              .import({
-                data: { info: ctx.payload.info, messages: ctx.payload.messages },
-                location: ctx.payload.location ?? { directory: AbsolutePath.make(process.cwd()) },
-              })
-              .pipe(
-                Effect.catchTag(
-                  "SessionTransfer.ImportConflictError",
-                  (error) =>
-                    new ConflictError({
-                      message: `Session already exists: ${error.sessionID}`,
-                      resource: error.sessionID,
-                    }),
-                ),
+          const principal = yield* Principal
+          const imported = yield* transfer
+            .import({
+              data: { info: ctx.payload.info, messages: ctx.payload.messages },
+              location: ctx.payload.location ?? { directory: AbsolutePath.make(process.cwd()) },
+              ownerID: principal.userID,
+            })
+            .pipe(
+              Effect.catchTag(
+                "SessionTransfer.ImportConflictError",
+                (error) =>
+                  new ConflictError({
+                    message: `Session already exists: ${error.sessionID}`,
+                    resource: error.sessionID,
+                  }),
               ),
+            )
+          return {
+            data: imported,
           }
         }),
       )
@@ -157,9 +169,22 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.active",
         Effect.fn(function* () {
+          const principal = yield* Principal
           const active = yield* session.active
+          const owned = new Set(
+            (yield* db
+              .select({ id: SessionTable.id })
+              .from(SessionTable)
+              .where(eq(SessionTable.owner_id, principal.userID))
+              .all()
+              .pipe(Effect.orDie)).map((row) => row.id),
+          )
           return {
-            data: Object.fromEntries(Array.from(active, (sessionID) => [sessionID, { type: "running" as const }])),
+            data: Object.fromEntries(
+              Array.from(active)
+                .filter((sessionID) => owned.has(sessionID))
+                .map((sessionID) => [sessionID, { type: "running" as const }]),
+            ),
           }
         }),
       )

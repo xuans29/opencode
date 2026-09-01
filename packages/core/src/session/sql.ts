@@ -15,6 +15,7 @@ import type { Session } from "@opencode-ai/schema/session"
 import type { CompactionPayload, MovePayload, SyntheticPayload, UserPayload } from "@opencode-ai/schema/session-inbox"
 import type { RevertV1 } from "@opencode-ai/schema/session-revert"
 import type { Schema } from "effect"
+import { User } from "@opencode-ai/schema/user"
 
 type SessionMessageData = Omit<(typeof SessionMessage.Info)["Encoded"], "type" | "id">
 
@@ -22,6 +23,7 @@ export const SessionTable = sqliteTable(
   "session_v2",
   {
     id: text().$type<SessionSchema.ID>().primaryKey(),
+    owner_id: text().$type<User.ID>().notNull().default(User.ID.local),
     project_id: text()
       .$type<Project.ID>()
       .notNull()

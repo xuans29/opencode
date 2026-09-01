@@ -12,4 +12,7 @@ export const password = Config.redacted("OPENCODE_PASSWORD").pipe(
   Config.withDefault(undefined),
 )
 
+// JSON array of { id, apiKey } entries used by Linux multi-user server deployments.
+export const users = Config.redacted("OPENCODE_SERVER_USERS").pipe(Config.withDefault(undefined))
+
 export * as Env from "./env"

@@ -5,7 +5,6 @@ import type { PreparedProcess } from "../shell.js"
 
 export function prepare(input: PreparedProcess, workspace: string, executable: string): PreparedProcess {
   const lang = input.env.LANG ?? "C.UTF-8"
-  const home = input.env.HOME ?? ""
   const sandboxPath = [
     path.posix.join(workspace, ".venv/bin"),
     path.posix.join(workspace, "node_modules/.bin"),
@@ -14,29 +13,32 @@ export function prepare(input: PreparedProcess, workspace: string, executable: s
     .filter((item): item is string => item !== undefined && item.length > 0)
     .join(":")
   const env = Object.fromEntries(
-    ["PATH", "HOME", "LANG", "TMPDIR"].flatMap((key) => {
+    ["PATH", "LANG"].flatMap((key) => {
       const value = input.env[key]
       return value === undefined ? [] : [[key, value]]
     }),
   )
+  const roots = ["/usr", "/usr/local", "/bin", "/sbin", "/lib", "/lib64", "/etc"]
+  const directories = [...new Set([...roots, ...parents(workspace), workspace])]
 
   return {
     executable,
     args: [
       "--die-with-parent",
       "--new-session",
-      "--unshare-user",
+      "--unshare-all",
       "--disable-userns",
-      "--unshare-ipc",
-      "--unshare-net",
-      "--unshare-uts",
+      "--assert-userns-disabled",
       "--cap-drop",
       "ALL",
-      "--ro-bind",
+      "--tmpfs",
       "/",
-      "/",
+      ...directories.flatMap((directory) => ["--dir", directory]),
+      ...roots.flatMap((root) => ["--ro-bind-try", root, root]),
       "--dev",
       "/dev",
+      "--proc",
+      "/proc",
       "--tmpfs",
       "/tmp",
       "--bind",
@@ -50,7 +52,7 @@ export function prepare(input: PreparedProcess, workspace: string, executable: s
       sandboxPath,
       "--setenv",
       "HOME",
-      home,
+      workspace,
       "--setenv",
       "LANG",
       lang,
@@ -70,4 +72,16 @@ export function prepare(input: PreparedProcess, workspace: string, executable: s
     cwd: input.cwd,
     env,
   }
+}
+
+function parents(input: string) {
+  const result: string[] = []
+  const parsed = path.posix.parse(input)
+  const relative = input.slice(parsed.root.length).split("/").filter(Boolean)
+  relative.slice(0, -1).reduce((current, segment) => {
+    const next = path.posix.join(current, segment)
+    result.push(next)
+    return next
+  }, parsed.root)
+  return result
 }

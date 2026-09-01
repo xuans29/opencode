@@ -75,8 +75,8 @@ export function createRoutes(
   overrides: LayerNode.Replacements = [],
 ) {
   return makeRoutes(
-    options.password
-      ? ServerAuth.Config.configLayer({ password: Option.some(options.password) })
+    options.password || options.users?.length
+      ? ServerAuth.Config.configLayer({ password: Option.fromNullishOr(options.password), users: options.users })
       : ServerAuth.Config.layer,
     options,
     serviceURLs,

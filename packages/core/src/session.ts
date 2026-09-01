@@ -50,6 +50,8 @@ import { Global } from "@opencode-ai/util/global"
 import { Shell as ShellSchema } from "@opencode-ai/schema/shell"
 import { KeyedMutex } from "./effect/keyed-mutex.js"
 import { fileURLToPath } from "url"
+import { User } from "@opencode-ai/schema/user"
+import { Sandbox } from "./sandbox/service.js"
 
 // get project -> project.locations
 //
@@ -63,6 +65,7 @@ import { fileURLToPath } from "url"
 export { ListAnchor }
 
 const ListInputBase = {
+  ownerID: User.ID.pipe(Schema.optional),
   workspaceID: Workspace.ID.pipe(Schema.optional),
   search: Schema.String.pipe(Schema.optional),
   limit: PositiveInt.pipe(Schema.optional),
@@ -88,6 +91,7 @@ export const ListInput = Schema.Union([ListDirectoryInput, ListProjectInput, Lis
 export type ListInput = typeof ListInput.Type
 
 type CreateBaseInput = {
+  ownerID?: User.ID
   id?: SessionSchema.ID
   title?: string
   agent?: Agent.ID
@@ -346,8 +350,28 @@ const layer = Layer.effect(
     const result = Service.of({
       create: Effect.fn("Session.create")(function* (input) {
         const sessionID = input.id ?? SessionSchema.ID.create()
+        const parentRow = input.parentID
+          ? yield* db
+              .select({ ownerID: SessionTable.owner_id })
+              .from(SessionTable)
+              .where(eq(SessionTable.id, input.parentID))
+              .get()
+              .pipe(Effect.orDie)
+          : undefined
+        const ownerID = input.ownerID ?? parentRow?.ownerID ?? User.ID.local
+        if (input.parentID && (!parentRow || parentRow.ownerID !== ownerID))
+          return yield* new NotFoundError({ sessionID: input.parentID })
         const recorded = yield* store.get(sessionID)
-        if (recorded) return recorded
+        if (recorded) {
+          const row = yield* db
+            .select({ ownerID: SessionTable.owner_id })
+            .from(SessionTable)
+            .where(eq(SessionTable.id, sessionID))
+            .get()
+            .pipe(Effect.orDie)
+          if (row?.ownerID !== ownerID) return yield* new NotFoundError({ sessionID })
+          return recorded
+        }
         const parent = input.parentID ? yield* store.get(input.parentID) : undefined
         if (input.parentID && parent === undefined) return yield* new NotFoundError({ sessionID: input.parentID })
         const location = parent?.location ?? input.location
@@ -395,6 +419,12 @@ const layer = Layer.effect(
             }),
           )
         if (projected.type === "existing") return projected.session
+        yield* db
+          .update(SessionTable)
+          .set({ owner_id: ownerID })
+          .where(eq(SessionTable.id, sessionID))
+          .run()
+          .pipe(Effect.orDie)
         // TODO: Restore recorded sessions onto replacement synchronized workspaces in a future API slice.
         return yield* result.get(sessionID).pipe(Effect.orDie)
       }),
@@ -451,6 +481,7 @@ const layer = Layer.effect(
         const order = direction === "previous" ? (requestedOrder === "asc" ? "desc" : "asc") : requestedOrder
         const sortColumn = SessionTable.time_updated
         const conditions: SQL[] = []
+        if (input.ownerID) conditions.push(eq(SessionTable.owner_id, input.ownerID))
         if ("directory" in input) conditions.push(eq(SessionTable.directory, input.directory))
         if (input.workspaceID) conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
         if ("project" in input) conditions.push(eq(SessionTable.project_id, input.project))
@@ -639,8 +670,18 @@ const layer = Layer.effect(
             yield* execution.awaitIdle(input.sessionID)
             const started = yield* Effect.gen(function* () {
               const shell = yield* Shell.Service
+              const sandbox = yield* Sandbox.Service
               return yield* shell
-                .create({ command: input.command, cwd: session.location.directory, timeout: 0 })
+                .create(
+                  {
+                    command: input.command,
+                    cwd: session.location.directory,
+                    timeout: 0,
+                    metadata: { sessionID: input.sessionID },
+                  },
+                  undefined,
+                  sandbox.prepare,
+                )
                 .pipe(Effect.orDie)
             }).pipe(Effect.provide(locations.get(session.location)))
             yield* bus.publish(
