@@ -31,6 +31,7 @@ import { SessionStore } from "@opencode-ai/core/session/store"
 import { Permission } from "@opencode-ai/core/permission"
 import { PluginRuntime } from "@opencode-ai/core/plugin/runtime"
 import { PluginSupervisor } from "@opencode-ai/core/plugin/supervisor"
+import { Sandbox } from "@opencode-ai/core/sandbox/service"
 import { Shell } from "@opencode-ai/core/shell"
 import { Shell as ShellSchema } from "@opencode-ai/schema/shell"
 import { ShellTool } from "@opencode-ai/core/tool/plugin/shell"
@@ -45,6 +46,7 @@ import { toolIdentity, executeTool, registerToolPlugin, toolDefinitions } from "
 const sessionID = Session.ID.make("ses_shell_tool_test")
 const sessionModel = Model.Ref.make({ id: Model.ID.make("test"), providerID: Provider.ID.make("test") })
 const assertions: Permission.AssertInput[] = []
+const preparedProcesses: Shell.PreparedProcess[] = []
 const allowedActions = new Set<string>()
 let denyAction: string | undefined
 let afterPermission = (_input: Permission.AssertInput): Effect.Effect<void> => Effect.void
@@ -70,10 +72,26 @@ const permission = permissionLayer({
 
 const reset = () => {
   assertions.length = 0
+  preparedProcesses.length = 0
   allowedActions.clear()
   denyAction = undefined
   afterPermission = () => Effect.void
 }
+
+const sandbox = makeLocationNode({
+  service: Sandbox.Service,
+  layer: Layer.succeed(
+    Sandbox.Service,
+    Sandbox.Service.of({
+      prepare: (input) =>
+        Effect.sync(() => {
+          preparedProcesses.push(input)
+          return input
+        }),
+    }),
+  ),
+  deps: [],
+})
 
 const executionNode = makeGlobalNode({
   service: SessionExecution.Service,
@@ -135,6 +153,7 @@ const shellPluginSupervisor = makeLocationNode({
     LocationMutation.node,
     Permission.node,
     PluginRuntime.node,
+    Sandbox.node,
     Shell.node,
     Tool.node,
   ],
@@ -155,6 +174,7 @@ const nodes = LayerNode.group([
 const replacements = [
   [SessionExecution.node, executionNode],
   [Permission.node, permission],
+  [Sandbox.node, sandbox],
   [Global.node, tempGlobalLayer],
 ] satisfies LayerNode.Replacements
 const productionIt = testEffect(AppNodeBuilder.build(nodes, replacements))
@@ -216,6 +236,24 @@ const withSession = <A, E, R>(directory: string, body: (registry: Tool.Interface
   })
 
 describe("ShellTool", () => {
+  it.live("prepares every ordinary shell command through the Sandbox service", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        return withSession(tmp.path, (registry) => executeTool(registry, call({ command: helloCommand }))).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              expect(preparedProcesses).toHaveLength(1)
+              expect(preparedProcesses[0]?.cwd).toBe(realpathSync(tmp.path))
+            }),
+          ),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
+    ),
+  )
+
   productionIt.live(
     "registers and returns real successful output from the active Location",
     () =>
