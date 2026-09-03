@@ -18,7 +18,7 @@ export function prepare(input: PreparedProcess, workspace: string, executable: s
       return value === undefined ? [] : [[key, value]]
     }),
   )
-  const roots = ["/usr", "/usr/local", "/bin", "/sbin", "/lib", "/lib64", "/etc"]
+  const roots = ["/usr", "/usr/local", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/proc"]
   const directories = [...new Set([...roots, ...parents(workspace), workspace])]
 
   return {
