@@ -30,14 +30,18 @@ describe("bwrap sandbox", () => {
       workspace,
       workspace,
     ])
-    expect(prepared.args).toContain("--unshare-all")
-    expect(prepared.args).toContain("--disable-userns")
-    expect(prepared.args).toContain("--assert-userns-disabled")
+    expect(prepared.args).toContain("--unshare-user")
+    expect(prepared.args).toContain("--unshare-ipc")
+    expect(prepared.args).toContain("--unshare-net")
+    expect(prepared.args).toContain("--unshare-uts")
+    expect(prepared.args).not.toContain("--unshare-all")
+    expect(prepared.args).not.toContain("--disable-userns")
+    expect(prepared.args).not.toContain("--assert-userns-disabled")
     expect(prepared.args).toContain("--cap-drop")
     expect(prepared.args).toContain("--dev")
     expect(prepared.args).toContain("--tmpfs")
     expect(prepared.args).toContain("--clearenv")
-    expect(prepared.args).toContain("--proc")
+    expect(prepared.args).not.toContain("--proc")
 
     const pathIndex = prepared.args.findIndex(
       (item, index) => item === "PATH" && prepared.args[index - 1] === "--setenv",
