@@ -28,6 +28,7 @@ export function prepare(input: PreparedProcess, workspace: string, executable: s
       "--new-session",
       "--unshare-user",
       "--unshare-ipc",
+      "--unshare-pid",
       "--unshare-net",
       "--unshare-uts",
       "--cap-drop",

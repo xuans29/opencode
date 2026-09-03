@@ -252,6 +252,21 @@ describe("bounded sandbox security and resource integration", () => {
   )
 
   integrationTest(
+    "allows hard links whose directory entries are all inside the workspace",
+    async () => {
+      const fixture = await createFixture()
+      const original = path.join(fixture.workspace, "internal-original.txt")
+      await fs.writeFile(original, "internal-hardlink-marker")
+      await fs.link(original, path.join(fixture.workspace, "internal-link.txt"))
+      const result = await runSandbox(fixture.workspace, "cat internal-link.txt")
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toBe("internal-hardlink-marker")
+    },
+    10_000,
+  )
+
+  integrationTest(
     "blocks reading an outside file through a workspace hard link",
     async () => {
       const fixture = await createFixture()
@@ -259,10 +274,11 @@ describe("bounded sandbox security and resource integration", () => {
       const link = path.join(fixture.workspace, "hardlink-read.txt")
       await fs.writeFile(outside, "outside-hardlink-marker")
       await fs.link(outside, link)
-      const result = await runSandbox(fixture.workspace, "cat hardlink-read.txt")
 
-      expect(result.exitCode).not.toBe(0)
-      expect(result.stdout).not.toContain("outside-hardlink-marker")
+      await expect(runSandbox(fixture.workspace, "cat hardlink-read.txt")).rejects.toThrow(
+        "hard-linked outside the workspace",
+      )
+      expect(await fs.readFile(outside, "utf8")).toBe("outside-hardlink-marker")
     },
     10_000,
   )
@@ -275,9 +291,10 @@ describe("bounded sandbox security and resource integration", () => {
       const link = path.join(fixture.workspace, "hardlink-write.txt")
       await fs.writeFile(outside, "outside-original")
       await fs.link(outside, link)
-      const result = await runSandbox(fixture.workspace, "printf sandbox-change > hardlink-write.txt")
 
-      expect(result.exitCode).not.toBe(0)
+      await expect(runSandbox(fixture.workspace, "printf sandbox-change > hardlink-write.txt")).rejects.toThrow(
+        "hard-linked outside the workspace",
+      )
       expect(await fs.readFile(outside, "utf8")).toBe("outside-original")
     },
     10_000,

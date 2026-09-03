@@ -32,6 +32,7 @@ describe("bwrap sandbox", () => {
     ])
     expect(prepared.args).toContain("--unshare-user")
     expect(prepared.args).toContain("--unshare-ipc")
+    expect(prepared.args).toContain("--unshare-pid")
     expect(prepared.args).toContain("--unshare-net")
     expect(prepared.args).toContain("--unshare-uts")
     expect(prepared.args).not.toContain("--unshare-all")
